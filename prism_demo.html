@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prism — AI Market Research Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f5f7fa; color: #1a1a2e; min-height: 100vh;
+  }
+
+  header {
+    background: #1f3a5f; color: white; padding: 16px 32px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 1.35rem; font-weight: 700; }
+  header .subtitle { font-size: 0.82rem; opacity: 0.65; margin-left: 6px; }
+  .tagline {
+    font-size: 0.78rem; opacity: 0.5; font-style: italic; margin-left: 4px;
+  }
+  .demo-badge {
+    margin-left: auto; background: #f59e0b; color: #1a1a2e;
+    font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 99px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+  }
+
+  .layout { display: grid; grid-template-columns: 260px 1fr; min-height: calc(100vh - 54px); }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    background: #fff; border-right: 1px solid #e2e8f0;
+    padding: 22px 16px; display: flex; flex-direction: column; gap: 22px;
+  }
+  .sidebar h3 {
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #64748b; margin-bottom: 6px;
+  }
+  .example-btn {
+    display: block; width: 100%; text-align: left; padding: 9px 11px;
+    border: 1px solid #e2e8f0; border-radius: 7px; background: #f8fafc;
+    cursor: pointer; font-size: 0.8rem; color: #334155; margin-bottom: 6px;
+    transition: all 0.15s;
+  }
+  .example-btn:hover, .example-btn.active {
+    background: #dbeafe; border-color: #93c5fd; color: #1e40af;
+  }
+  .settings-row { display: flex; flex-direction: column; gap: 6px; }
+  .settings-row label { font-size: 0.82rem; color: #475569; }
+  .settings-row input[type=range] { width: 100%; }
+  .settings-row .val { font-size: 0.79rem; color: #1f3a5f; font-weight: 600; }
+  .run-btn {
+    width: 100%; padding: 11px; background: #1f3a5f; color: white;
+    border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .run-btn:hover { background: #2d5282; }
+  .about { font-size: 0.76rem; color: #64748b; line-height: 1.5; }
+
+  /* ── Main ── */
+  .main { padding: 26px 30px; display: flex; flex-direction: column; gap: 22px; }
+
+  .input-card {
+    background: #fff; border-radius: 11px; padding: 20px 22px;
+    border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .input-card h2 { font-size: 0.95rem; margin-bottom: 9px; color: #1f3a5f; }
+  .input-card textarea {
+    width: 100%; height: 90px; padding: 9px 12px;
+    border: 1px solid #cbd5e1; border-radius: 7px; resize: none;
+    font-size: 0.85rem; line-height: 1.5; font-family: inherit; color: #334155;
+    background: #f8fafc;
+  }
+
+  /* ── Pipeline steps ── */
+  .pipeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+  .step-card {
+    background: #fff; border-radius: 10px; padding: 15px 16px;
+    border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+  }
+  .step-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+  .step-num {
+    width: 26px; height: 26px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 0.78rem; font-weight: 700; flex-shrink: 0;
+  }
+  .step-num.done { background: #22c55e; color: white; }
+  .step-num.pending { background: #e2e8f0; color: #64748b; }
+  .step-card h4 { font-size: 0.84rem; color: #1a1a2e; }
+  .step-card p { font-size: 0.76rem; color: #64748b; line-height: 1.4; margin-left: 35px; }
+  .step-log {
+    margin-left: 35px; margin-top: 6px;
+    font-size: 0.74rem; color: #475569; line-height: 1.5;
+  }
+  .step-log .log-item::before { content: "› "; color: #22c55e; font-weight: 700; }
+
+  /* ── Results card ── */
+  .results-card {
+    background: #fff; border-radius: 11px; border: 1px solid #e2e8f0;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04); overflow: hidden;
+  }
+  .tabs { display: flex; border-bottom: 1px solid #e2e8f0; overflow-x: auto; }
+  .tab-btn {
+    padding: 11px 18px; border: none; background: none; cursor: pointer;
+    font-size: 0.83rem; color: #64748b; border-bottom: 2px solid transparent;
+    white-space: nowrap; transition: all 0.15s;
+  }
+  .tab-btn.active { color: #1f3a5f; border-bottom-color: #1f3a5f; font-weight: 600; }
+  .tab-btn:hover:not(.active) { background: #f8fafc; }
+
+  .tab-pane { padding: 22px 24px; display: none; }
+  .tab-pane.active { display: block; }
+
+  /* ── Metrics ── */
+  .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+  .metric-box { background: #f8fafc; border-radius: 8px; padding: 13px 16px; border: 1px solid #e2e8f0; }
+  .metric-box .mlabel { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+  .metric-box .mval { font-size: 1.45rem; font-weight: 700; color: #1f3a5f; margin: 3px 0; }
+  .metric-box .msub { font-size: 0.75rem; color: #94a3b8; }
+
+  .insight-box {
+    background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+    padding: 11px 15px; font-size: 0.86rem; color: #1e40af; margin-bottom: 18px;
+  }
+
+  /* ── Charts ── */
+  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+  .chart-box { background: #f8fafc; border-radius: 8px; padding: 13px 14px; border: 1px solid #e2e8f0; }
+  .chart-box h4 { font-size: 0.79rem; color: #475569; margin-bottom: 10px; line-height: 1.35; }
+  .chart-box canvas { max-height: 190px; }
+
+  /* ── Open responses ── */
+  .open-section h4 { font-size: 0.88rem; color: #1a1a2e; margin-bottom: 10px; }
+  .open-group { margin-bottom: 12px; }
+  .open-seg-label { font-size: 0.78rem; font-weight: 600; color: #475569; margin-bottom: 5px; }
+  .open-quote {
+    background: #f8fafc; border-left: 3px solid #cbd5e1; padding: 7px 11px;
+    font-size: 0.8rem; color: #475569; margin-bottom: 5px; border-radius: 0 4px 4px 0;
+    line-height: 1.45;
+  }
+
+  /* ── Segments tab ── */
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+  th { text-align: left; padding: 8px 12px; background: #f1f5f9; color: #475569; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 0.73rem; font-weight: 600; }
+  .pill-blue { background: #dbeafe; color: #1e40af; }
+
+  /* ── Survey tab ── */
+  .q-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 13px 15px; margin-bottom: 9px; }
+  .q-type { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 7px; }
+  .qt-likert5 { background: #fef9c3; color: #854d0e; }
+  .qt-binary   { background: #dcfce7; color: #166534; }
+  .qt-wtp      { background: #fce7f3; color: #9d174d; }
+  .qt-open     { background: #e0e7ff; color: #3730a3; }
+  .q-text { font-size: 0.87rem; color: #1a1a2e; margin: 6px 0 3px; }
+  .q-scale { font-size: 0.76rem; color: #94a3b8; }
+
+  .persona-card { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .persona-hdr {
+    padding: 10px 15px; background: #f8fafc; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.86rem; font-weight: 600;
+  }
+  .persona-body {
+    display: none; padding: 12px 15px; font-size: 0.81rem;
+    color: #475569; line-height: 1.55; background: #fff; border-top: 1px solid #f1f5f9;
+  }
+  .persona-body.open { display: block; }
+
+  /* ── Recs tab ── */
+  .recs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .rec-item {
+    display: flex; gap: 9px; background: #f0fdf4;
+    border: 1px solid #bbf7d0; border-radius: 8px; padding: 11px 13px; margin-bottom: 9px;
+  }
+  .rec-num {
+    flex-shrink: 0; width: 21px; height: 21px; border-radius: 50%;
+    background: #22c55e; color: white; font-size: 0.72rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .rec-item p { font-size: 0.83rem; color: #166534; }
+  .risk-item {
+    background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px;
+    padding: 11px 13px; font-size: 0.83rem; color: #9a3412; margin-bottom: 9px;
+  }
+  .target-box {
+    margin-top: 14px; background: #eff6ff; border: 1px solid #bfdbfe;
+    border-radius: 8px; padding: 12px 15px; font-size: 0.86rem; color: #1e40af;
+  }
+
+  /* ── Raw tab ── */
+  .raw-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
+  .raw-wrap table { min-width: 580px; }
+
+  .section-title { font-size: 0.92rem; font-weight: 600; color: #1a1a2e; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="26" height="26" viewBox="0 0 28 28" fill="none">
+    <circle cx="14" cy="14" r="13" stroke="white" stroke-width="1.5"/>
+    <path d="M8 14 Q14 6 20 14 Q14 22 8 14Z" fill="white" opacity="0.55"/>
+    <circle cx="14" cy="14" r="3" fill="white"/>
+  </svg>
+  <h1>Prism</h1>
+  <span class="subtitle">Automated Market Research via Multi-Agent LLMs</span>
+  <span class="tagline">One input, refracted into many stakeholder perspectives</span>
+  <span class="demo-badge">UI Demo</span>
+</header>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div>
+      <h3>Try an Example</h3>
+      <button class="example-btn active" onclick="loadExample(0)">🍼 Fertility Subsidy (Taiwan)</button>
+      <button class="example-btn" onclick="loadExample(1)">💻 Co-Working App</button>
+      <button class="example-btn" onclick="loadExample(2)">🛵 Electric Scooter Trade-In</button>
+    </div>
+
+    <div>
+      <h3>Simulation Settings</h3>
+      <div class="settings-row">
+        <label>Responses per segment × question</label>
+        <input type="range" id="rpcSlider" min="3" max="30" value="10"
+               oninput="updateSlider()">
+        <div class="val"><span id="rpcVal">10</span> responses ·
+          est. <span id="rpcEst">200</span> API calls</div>
+      </div>
+    </div>
+
+    <button class="run-btn" onclick="runDemo()">▶ Run Pipeline</button>
+
+    <div class="about">
+      <strong>Architecture</strong><br>
+      Agent 1 identifies segments and designs questions → Simulation layer dispatches parallel persona-conditioned API calls → Agent 2 aggregates and recommends.<br><br>
+      <strong>Reference</strong><br>
+      Brand, Israeli & Ngwe (2023), <em>Using GPT for Market Research</em>, MSI WP 23-131
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- Input -->
+    <div class="input-card">
+      <h2>Product / Policy Description</h2>
+      <textarea id="inputText" readonly></textarea>
+    </div>
+
+    <!-- Pipeline steps -->
+    <div class="pipeline" id="pipeline">
+      <div class="step-card">
+        <div class="step-head">
+          <div class="step-num pending" id="sn1">1</div>
+          <h4>Agent 1 — Audience Analyst</h4>
+        </div>
+        <p>Identifies target segments, assigns population weights, designs 5 survey questions</p>
+        <div class="step-log" id="log1"></div>
+      </div>
+      <div class="step-card">
+        <div class="step-head">
+          <div class="step-num pending" id="sn2">2</div>
+          <h4>Simulation Layer</h4>
+        </div>
+        <p>Parallel API calls, each conditioned on a vivid demographic persona (temp = 1.0)</p>
+        <div class="step-log" id="log2"></div>
+      </div>
+      <div class="step-card">
+        <div class="step-head">
+          <div class="step-num pending" id="sn3">3</div>
+          <h4>Agent 2 — Strategist</h4>
+        </div>
+        <p>Aggregates responses with segment weights, generates actionable recommendations</p>
+        <div class="step-log" id="log3"></div>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="results-card" id="resultsCard" style="display:none">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
+        <button class="tab-btn" onclick="switchTab('segments')">Segments</button>
+        <button class="tab-btn" onclick="switchTab('survey')">Survey Design</button>
+        <button class="tab-btn" onclick="switchTab('recs')">Recommendations</button>
+        <button class="tab-btn" onclick="switchTab('raw')">Raw Data</button>
+      </div>
+
+      <div class="tab-pane active" id="tab-overview">
+        <div class="metrics" id="metricsRow"></div>
+        <div id="insightBox"></div>
+        <div class="chart-grid" id="chartGrid"></div>
+        <div id="openSection"></div>
+      </div>
+
+      <div class="tab-pane" id="tab-segments">
+        <div class="section-title">Audience Segments</div>
+        <table>
+          <thead><tr><th>Segment</th><th>Weight</th><th>Rationale</th></tr></thead>
+          <tbody id="segBody"></tbody>
+        </table>
+      </div>
+
+      <div class="tab-pane" id="tab-survey">
+        <div class="section-title">Survey Questions (Agent 1 output)</div>
+        <div id="questionsList"></div>
+        <div class="section-title" style="margin-top:20px">Segment Personas</div>
+        <div id="personasList"></div>
+      </div>
+
+      <div class="tab-pane" id="tab-recs">
+        <div class="recs-grid">
+          <div>
+            <div class="section-title">Strategic Recommendations</div>
+            <div id="recList"></div>
+          </div>
+          <div>
+            <div class="section-title">Risk Flags</div>
+            <div id="riskList"></div>
+          </div>
+        </div>
+        <div class="target-box" id="targetBox"></div>
+      </div>
+
+      <div class="tab-pane" id="tab-raw">
+        <div class="section-title">Simulated Responses (sample)</div>
+        <div class="raw-wrap">
+          <table>
+            <thead><tr><th>Segment</th><th>Q</th><th>Parsed Value</th><th>Raw Response (truncated)</th></tr></thead>
+            <tbody id="rawBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ─── Mock data per example ──────────────────────────────────────────────────
+const EXAMPLES = [
+  {
+    label: "🍼 Fertility Subsidy (Taiwan)",
+    input: "A government policy offering NT$200,000 cash subsidy per child for the first two children, targeted at married couples aged 25–40 living in major urban centers (Taipei, Taichung, Kaohsiung). The subsidy is paid in installments over 3 years and is means-tested (household income below NT$1.5M/year).",
+    segments: [
+      { name: "Young Urban Couples", weight: 0.30, rationale: "Primary target — married, child-bearing age, urban, income-eligible" },
+      { name: "Single Professionals", weight: 0.20, rationale: "Potential future beneficiaries; attitudes shape public support" },
+      { name: "Parents with Children", weight: 0.25, rationale: "May benefit for second child; strong opinions on adequacy" },
+      { name: "Employers (SME)", weight: 0.15, rationale: "Affected by parental leave demand; shape workplace norms" },
+      { name: "Rural Households", weight: 0.10, rationale: "Lower uptake expected; urban-rural equity concern" }
+    ],
+    questions: [
+      { id: "q1", type: "likert5", text: "This fertility subsidy would meaningfully change my family planning decisions.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q2", type: "binary",  text: "Would you apply for this subsidy if you became eligible in the next 3 years?", scale_label: "Answer yes or no" },
+      { id: "q3", type: "wtp",     text: "What minimum total subsidy (in NT$) would make you consider having a child sooner than planned?", scale_label: "Number only in NT$" },
+      { id: "q4", type: "likert5", text: "The NT$200,000 subsidy is sufficient to offset the cost of raising a child in Taiwan.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q5", type: "open",    text: "In 1–2 sentences, what is your main concern or hope about this fertility policy?", scale_label: "" }
+    ],
+    segmentResults: [
+      { segment: "Young Urban Couples",   q1: 3.8, q2: 72, q3: 180000, q4: 2.6, openSamples: ["The amount helps, but childcare costs in Taipei are still overwhelming after the subsidy runs out.", "It makes us more optimistic about timing, though we worry about job security during parental leave."] },
+      { segment: "Single Professionals",  q1: 2.4, q2: 31, q3: 350000, q4: 1.9, openSamples: ["I don't plan to have children soon, but I think this is a good step for society.", "NT$200k sounds large but covers maybe one year of full-time childcare — not nearly enough."] },
+      { segment: "Parents with Children", q1: 3.3, q2: 58, q3: 220000, q4: 2.2, openSamples: ["We already have one child and this might push us toward a second sooner.", "I hope the installment structure doesn't create cash-flow problems in the first year."] },
+      { segment: "Employers (SME)",       q1: 2.1, q2: 18, q3: 0,      q4: 2.0, openSamples: ["More parental leave requests will strain our small team without government support for employers.", "Good for society long-term, but our HR costs will rise in the short run."] },
+      { segment: "Rural Households",      q1: 2.9, q2: 44, q3: 150000, q4: 3.1, openSamples: ["In our area cost of living is lower so the subsidy goes further.", "Hard to access — we'd need local offices, not just online applications."] }
+    ],
+    output: {
+      reception_score: 3.1,
+      key_insight: "Young urban couples respond most positively, but universal concern about subsidy adequacy against real childcare costs suggests NT$200k may be a floor, not a ceiling.",
+      recommendations: [
+        "Target marketing at young urban couples aged 28–35 with messaging focused on financial security and timing flexibility, not just the subsidy amount.",
+        "Bundle the subsidy announcement with employer incentives (e.g., parental leave wage top-up) to address the SME friction point and reduce workplace pressure on eligible employees.",
+        "Introduce a supplementary childcare voucher of NT$50,000–80,000 to close the perception gap between the subsidy and real first-year costs."
+      ],
+      risk_flags: [
+        "60% of single professionals and employers view the subsidy as insufficient — risks political backlash if framed as the primary solution to low fertility.",
+        "Rural uptake barriers (application access, lower awareness) may result in urban-biased impact, undermining the policy's equity goals."
+      ],
+      target_segment: "Young Urban Couples"
+    },
+    rawSamples: [
+      { seg: "Young Urban Couples",   qid: "q1", val: 4, raw: "4 — this would definitely make us talk seriously about starting a family this year." },
+      { seg: "Young Urban Couples",   qid: "q2", val: 1, raw: "yes" },
+      { seg: "Young Urban Couples",   qid: "q3", val: 200000, raw: "200000" },
+      { seg: "Single Professionals",  qid: "q1", val: 2, raw: "2. I'm not planning kids yet and even if I were, NT$200k doesn't really move the needle." },
+      { seg: "Single Professionals",  qid: "q2", val: 0, raw: "no" },
+      { seg: "Parents with Children", qid: "q1", val: 3, raw: "3 — it's enough to nudge us toward a second but not to change our timeline completely." },
+      { seg: "Employers (SME)",       qid: "q4", val: 2, raw: "2. The real cost burden is on us when employees take extended leave." },
+      { seg: "Rural Households",      qid: "q4", val: 3, raw: "3 — out here NT$200k is more meaningful, covers more than in the city." }
+    ]
+  },
+  {
+    label: "💻 Co-Working App",
+    input: "A subscription app for freelancers and remote workers in Taiwan that provides curated co-working space bookings, community networking events, and AI-powered productivity tools. Monthly subscription priced at NT$990. Targets professionals aged 25–40 who work remotely at least 3 days per week.",
+    segments: [
+      { name: "Freelancers",             weight: 0.35, rationale: "Core target — need workspace flexibility and community most" },
+      { name: "Remote Employees",        weight: 0.30, rationale: "Large segment; employer may subsidize, lowering price sensitivity" },
+      { name: "Digital Nomads",          weight: 0.15, rationale: "High mobility needs; strong network value" },
+      { name: "Part-Time Remote (3d/w)", weight: 0.20, rationale: "Edge case — may find value intermittent but balk at monthly fee" }
+    ],
+    questions: [
+      { id: "q1", type: "likert5", text: "This app would improve my remote work productivity and professional connections.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q2", type: "binary",  text: "Would you subscribe to this app at NT$990/month?", scale_label: "Answer yes or no" },
+      { id: "q3", type: "wtp",     text: "What is the maximum monthly amount (NT$) you would pay for this app?", scale_label: "Number only" },
+      { id: "q4", type: "likert5", text: "The community and networking features are a key reason I would subscribe.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q5", type: "open",    text: "What one feature or change would make you most likely to subscribe?", scale_label: "" }
+    ],
+    segmentResults: [
+      { segment: "Freelancers",             q1: 4.1, q2: 68, q3: 1200, q4: 3.9, openSamples: ["A real-time availability map for co-working spots would seal the deal for me.", "The networking events are the most exciting part — my biggest issue is isolation."] },
+      { segment: "Remote Employees",        q1: 3.6, q2: 55, q3: 990,  q4: 3.2, openSamples: ["If my company subsidized even half, I'd definitely sign up.", "I mostly care about the workspace booking — AI tools I already have through work."] },
+      { segment: "Digital Nomads",          q1: 4.4, q2: 74, q3: 1500, q4: 4.3, openSamples: ["Cross-city and cross-country coverage would be essential for me.", "Events are great but I need last-minute booking, not advance planning."] },
+      { segment: "Part-Time Remote (3d/w)", q1: 2.9, q2: 32, q3: 600,  q4: 2.5, openSamples: ["990 per month is too much when I only need it a few days a week.", "A pay-per-visit option would work better for my schedule."] }
+    ],
+    output: {
+      reception_score: 3.7,
+      key_insight: "Digital nomads and freelancers show strong willingness to pay above the listed price, but part-time remote workers are underserved by a flat monthly fee — a usage-based tier is needed.",
+      recommendations: [
+        "Introduce a 'Flex' tier at NT$499/month capped at 8 workspace visits to capture the part-time remote segment without cannibalizing the full subscription.",
+        "Lead marketing with community and networking as the primary value proposition — this drives the highest emotional resonance across all segments, especially for freelancers.",
+        "Partner with 3–5 large Taiwanese tech companies to offer employer-subsidized plans, unlocking the remote employee segment at scale."
+      ],
+      risk_flags: [
+        "Part-time remote workers (20% of target) show median WTP of NT$600 — well below the NT$990 price point, risking segment exclusion.",
+        "Digital nomads expect cross-city/international coverage; launching Taiwan-only may disappoint this high-WTP segment."
+      ],
+      target_segment: "Digital Nomads"
+    },
+    rawSamples: [
+      { seg: "Freelancers",      qid: "q1", val: 4, raw: "4 — working from cafes is exhausting, this would fix my biggest daily problem." },
+      { seg: "Freelancers",      qid: "q2", val: 1, raw: "yes" },
+      { seg: "Freelancers",      qid: "q3", val: 1100, raw: "1100" },
+      { seg: "Digital Nomads",   qid: "q1", val: 5, raw: "5, easily." },
+      { seg: "Digital Nomads",   qid: "q3", val: 1800, raw: "1800 — comparable to what I pay for similar services abroad." },
+      { seg: "Part-Time Remote (3d/w)", qid: "q2", val: 0, raw: "no — I only go remote 3 days, monthly subscription doesn't make sense." },
+      { seg: "Remote Employees", qid: "q4", val: 3, raw: "3 — networking is nice but not the reason I'd sign up." }
+    ]
+  },
+  {
+    label: "🛵 Electric Scooter Trade-In",
+    input: "A government-subsidized program offering NT$8,000 trade-in rebate for owners of gasoline scooters who switch to an electric model. Partnered with Gogoro and iRent. Available to scooter owners in Taiwan's six largest cities. Riders must complete the swap within 6 months of registration.",
+    segments: [
+      { name: "Daily Commuter Riders",    weight: 0.40, rationale: "Largest scooter segment; economics of switch most salient" },
+      { name: "Young Urban Riders <30",  weight: 0.25, rationale: "Eco-conscious; higher tech affinity; Gogoro brand resonance" },
+      { name: "Delivery Workers",         weight: 0.20, rationale: "Range and charging infrastructure critical; high daily mileage" },
+      { name: "Older Riders 50+",         weight: 0.15, rationale: "Skeptical of new tech; loyalty to existing scooter brand" }
+    ],
+    questions: [
+      { id: "q1", type: "likert5", text: "The NT$8,000 rebate makes switching to electric scooter financially attractive.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q2", type: "binary",  text: "Would you register for this program within the 6-month window?", scale_label: "Answer yes or no" },
+      { id: "q3", type: "wtp",     text: "What rebate amount (NT$) would make the switch feel like a no-brainer?", scale_label: "Number only" },
+      { id: "q4", type: "likert5", text: "I am confident there are enough charging stations near my daily routes.", scale_label: "1 = Strongly Disagree, 5 = Strongly Agree" },
+      { id: "q5", type: "open",    text: "What is your biggest hesitation or motivation about switching to electric?", scale_label: "" }
+    ],
+    segmentResults: [
+      { segment: "Daily Commuter Riders",   q1: 3.7, q2: 61, q3: 10000, q4: 3.2, openSamples: ["Fuel savings add up fast — NT$8k is a good starter but I'd want NT$12k to fully commit.", "My route is well-covered by GoStation so charging isn't my worry."] },
+      { segment: "Young Urban Riders <30", q1: 4.2, q2: 76, q3: 8000,  q4: 3.8, openSamples: ["I already wanted a Gogoro — this just makes it easier to justify.", "The environmental angle matters to me, and NT$8k makes the math work."] },
+      { segment: "Delivery Workers",        q1: 2.8, q2: 38, q3: 15000, q4: 2.1, openSamples: ["Range anxiety is a real issue — I can't afford to run out mid-delivery.", "NT$8k doesn't cover the income I'd lose if charging takes too long."] },
+      { segment: "Older Riders 50+",        q1: 2.3, q2: 24, q3: 12000, q4: 2.4, openSamples: ["I've had my scooter for 10 years, I don't trust the battery in heavy rain.", "Would switch if there was a local shop I could walk to for help, not just an app."] }
+    ],
+    output: {
+      reception_score: 3.3,
+      key_insight: "Young urban riders are highly receptive and price-satisfied at NT$8,000, but delivery workers and older riders — who together represent 35% of the target — require infrastructure guarantees and higher rebates, not just marketing.",
+      recommendations: [
+        "Fast-track the program for young urban riders with a streamlined Gogoro partnership — this segment converts at the current NT$8,000 rebate with minimal friction.",
+        "Create a delivery worker track with a higher NT$15,000 rebate and guaranteed charging priority at major logistics hubs to unlock this underserved segment.",
+        "Deploy mobile service teams in older residential neighborhoods (not just app-based support) to reduce adoption friction for riders 50+ who cite in-person trust as a key barrier."
+      ],
+      risk_flags: [
+        "Delivery workers show median required rebate of NT$15,000 — nearly double the current offer — and flag charging infrastructure as a deal-breaker, risking program failure in this segment.",
+        "6-month registration window may be too short for older riders who require in-person consultation, potentially excluding them entirely."
+      ],
+      target_segment: "Young Urban Riders <30"
+    },
+    rawSamples: [
+      { seg: "Daily Commuter Riders",   qid: "q1", val: 4, raw: "4 — I've been on the fence for a year, this tips it." },
+      { seg: "Daily Commuter Riders",   qid: "q2", val: 1, raw: "yes" },
+      { seg: "Delivery Workers",        qid: "q4", val: 2, raw: "2 — GoStation is fine downtown but I work the outer districts." },
+      { seg: "Young Urban Riders <30",  qid: "q1", val: 5, raw: "5 — I've already looked at Gogoro models, this just closes the deal." },
+      { seg: "Older Riders 50+",        qid: "q2", val: 0, raw: "no — I need someone to show me in person, not an app." },
+      { seg: "Older Riders 50+",        qid: "q3", val: 12000, raw: "12000, maybe more — at that level I'd seriously consider it." },
+      { seg: "Delivery Workers",        qid: "q3", val: 16000, raw: "16000 at minimum. My livelihood depends on the scooter not dying." }
+    ]
+  }
+];
+
+let currentExample = 0;
+let chartsCreated = {};
+
+function updateSlider() {
+  const v = +document.getElementById('rpcSlider').value;
+  document.getElementById('rpcVal').textContent = v;
+  document.getElementById('rpcEst').textContent = `${3*5*v}–${5*5*v}`;
+}
+updateSlider();
+
+function loadExample(i) {
+  currentExample = i;
+  document.querySelectorAll('.example-btn').forEach((b,j) => b.classList.toggle('active', j===i));
+  document.getElementById('inputText').value = EXAMPLES[i].input;
+  // Reset results
+  document.getElementById('resultsCard').style.display = 'none';
+  ['sn1','sn2','sn3'].forEach(id => {
+    document.getElementById(id).className = 'step-num pending';
+    document.getElementById(id).textContent = id.slice(-1);
+  });
+  ['log1','log2','log3'].forEach(id => document.getElementById(id).innerHTML = '');
+}
+loadExample(0); // init
+
+function switchTab(name) {
+  const names = ['overview','segments','survey','recs','raw'];
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', names[i]===name));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id==='tab-'+name));
+}
+
+function addLog(n, msg, delay) {
+  return new Promise(res => setTimeout(() => {
+    const el = document.getElementById('log'+n);
+    const d = document.createElement('div');
+    d.className = 'log-item'; d.textContent = msg;
+    el.appendChild(d);
+    res();
+  }, delay));
+}
+
+async function runDemo() {
+  const ex = EXAMPLES[currentExample];
+  const rpc = +document.getElementById('rpcSlider').value;
+  const totalCalls = ex.segments.length * 5 * rpc;
+
+  // Reset
+  document.getElementById('resultsCard').style.display = 'none';
+  ['log1','log2','log3'].forEach(id => document.getElementById(id).innerHTML = '');
+  ['sn1','sn2','sn3'].forEach(id => {
+    document.getElementById(id).className = 'step-num pending';
+  });
+
+  // Step 1 — Agent 1
+  document.getElementById('sn1').className = 'step-num done';
+  await addLog(1, 'Parsing product/policy description...', 0);
+  await addLog(1, `Identified ${ex.segments.length} target segments`, 400);
+  await addLog(1, 'Assigning population weights...', 700);
+  await addLog(1, `Designed ${ex.questions.length} survey questions`, 1000);
+
+  // Step 2 — Simulation
+  document.getElementById('sn2').className = 'step-num done';
+  await addLog(2, `Dispatching ${totalCalls} parallel API calls...`, 1200);
+  await addLog(2, `Personas injected: ${ex.segments.map(s=>s.name).join(', ')}`, 1700);
+  await addLog(2, `Temperature = 1.0 for response heterogeneity`, 2000);
+  await addLog(2, `${totalCalls} responses collected`, 2400);
+
+  // Step 3 — Agent 2
+  document.getElementById('sn3').className = 'step-num done';
+  await addLog(3, 'Aggregating responses with segment weights...', 2600);
+  await addLog(3, 'Computing distributional statistics...', 2900);
+  await addLog(3, 'Generating strategic recommendations...', 3200);
+
+  // Render after animation
+  await new Promise(r => setTimeout(r, 3600));
+  renderAll(ex, rpc, totalCalls);
+  document.getElementById('resultsCard').style.display = 'block';
+  document.getElementById('resultsCard').scrollIntoView({ behavior: 'smooth' });
+  switchTab('overview');
+}
+
+const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd'];
+
+function renderAll(ex, rpc, totalCalls) {
+  // Destroy old charts
+  Object.values(chartsCreated).forEach(c => c.destroy());
+  chartsCreated = {};
+
+  // ── Overview ──
+  const score = ex.output.reception_score;
+  document.getElementById('metricsRow').innerHTML = `
+    <div class="metric-box">
+      <div class="mlabel">Reception Score</div>
+      <div class="mval">${score}<span style="font-size:0.9rem;font-weight:400">/5</span></div>
+      <div class="msub">Weighted avg across segments</div>
+    </div>
+    <div class="metric-box">
+      <div class="mlabel">Target Segment</div>
+      <div class="mval" style="font-size:1rem;padding-top:6px">${ex.output.target_segment}</div>
+      <div class="msub">Most receptive group</div>
+    </div>
+    <div class="metric-box">
+      <div class="mlabel">Responses Collected</div>
+      <div class="mval">${totalCalls}</div>
+      <div class="msub">${ex.segments.length} segments × 5 questions × ${rpc}</div>
+    </div>
+  `;
+
+  document.getElementById('insightBox').innerHTML =
+    `<div class="insight-box"><strong>Key Insight:</strong> ${ex.output.key_insight}</div>`;
+
+  // Charts
+  const cg = document.getElementById('chartGrid');
+  cg.innerHTML = '';
+
+  const chartDefs = [
+    { qid: 'q1', label: 'Mean rating (1–5)', key: 'q1' },
+    { qid: 'q2', label: '% Yes', key: 'q2' },
+    { qid: 'q3', label: 'Mean WTP (NT$)', key: 'q3' },
+    { qid: 'q4', label: 'Mean rating (1–5)', key: 'q4' }
+  ];
+
+  chartDefs.forEach((cd, ci) => {
+    const q = ex.questions.find(q => q.id === cd.qid);
+    const labels = ex.segmentResults.map(sr => sr.segment);
+    const values = ex.segmentResults.map(sr => sr[cd.key]);
+    const id = 'ch_' + ci;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'chart-box';
+    wrap.innerHTML = `<h4>${q.text.substring(0,80)}${q.text.length>80?'…':''}</h4><canvas id="${id}"></canvas>`;
+    cg.appendChild(wrap);
+
+    chartsCreated[id] = new Chart(document.getElementById(id), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: labels.map((_,i) => COLORS[i%COLORS.length]+'bb'),
+          borderColor: labels.map((_,i) => COLORS[i%COLORS.length]),
+          borderWidth: 1, borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: {
+            beginAtZero: cd.qid !== 'q1' && cd.qid !== 'q4',
+            min: (cd.qid==='q1'||cd.qid==='q4') ? 1 : 0,
+            max: cd.qid==='q2' ? 100 : (cd.qid==='q1'||cd.qid==='q4') ? 5 : undefined,
+            title: { display: true, text: cd.label, font: { size: 10 } }
+          }
+        }
+      }
+    });
+  });
+
+  // Open responses
+  const openSec = document.getElementById('openSection');
+  const openQ = ex.questions.find(q => q.type === 'open');
+  let html = `<div class="open-section"><h4>Open-Ended Samples — "${openQ.text.substring(0,60)}…"</h4>`;
+  ex.segmentResults.forEach(sr => {
+    html += `<div class="open-group"><div class="open-seg-label">${sr.segment}</div>`;
+    sr.openSamples.forEach(s => `<div class="open-quote">${s}</div>`);
+    sr.openSamples.forEach(s => { html += `<div class="open-quote">${s}</div>`; });
+    html += '</div>';
+  });
+  openSec.innerHTML = html + '</div>';
+
+  // ── Segments ──
+  document.getElementById('segBody').innerHTML = ex.segments.map((s,i) => `
+    <tr>
+      <td><strong>${s.name}</strong></td>
+      <td><span class="pill pill-blue">${Math.round(s.weight*100)}%</span></td>
+      <td style="color:#475569">${s.rationale}</td>
+    </tr>
+  `).join('');
+
+  // ── Survey ──
+  const typeLabel = { likert5:'Likert 1–5', binary:'Yes / No', wtp:'Willingness to Pay', open:'Open-Ended' };
+  document.getElementById('questionsList').innerHTML = ex.questions.map(q => `
+    <div class="q-card">
+      <span class="q-type qt-${q.type}">${typeLabel[q.type]}</span>
+      <span style="font-size:0.72rem;color:#94a3b8">${q.id}</span>
+      <div class="q-text">${q.text}</div>
+      ${q.scale_label ? `<div class="q-scale">${q.scale_label}</div>` : ''}
+    </div>
+  `).join('');
+
+  document.getElementById('personasList').innerHTML = ex.segments.map((s,i) => `
+    <div class="persona-card">
+      <div class="persona-hdr" onclick="togglePersona(${i})">
+        <span>${s.name} <span class="pill pill-blue">${Math.round(s.weight*100)}%</span></span>
+        <span style="font-size:0.72rem;color:#94a3b8">▼ click to expand</span>
+      </div>
+      <div class="persona-body" id="persona${i}">
+        <strong>Persona prompt injected as system message:</strong><br><br>
+        You are a ${s.name.toLowerCase()} in Taiwan — ${s.rationale.toLowerCase()}.
+        You have strong opinions about this topic based on your daily life and economic situation.
+        Answer all survey questions as this person would, honestly and in character.
+      </div>
+    </div>
+  `).join('');
+
+  // ── Recs ──
+  document.getElementById('recList').innerHTML = ex.output.recommendations.map((r,i) => `
+    <div class="rec-item"><div class="rec-num">${i+1}</div><p>${r}</p></div>
+  `).join('');
+  document.getElementById('riskList').innerHTML = ex.output.risk_flags.map(r => `
+    <div class="risk-item">⚠ ${r}</div>
+  `).join('');
+  document.getElementById('targetBox').innerHTML =
+    `<strong>Highest-receptivity segment:</strong> ${ex.output.target_segment} — prioritize marketing and pilot rollout toward this group.`;
+
+  // ── Raw ──
+  document.getElementById('rawBody').innerHTML = ex.rawSamples.map(r => `
+    <tr>
+      <td>${r.seg}</td>
+      <td style="color:#64748b;font-size:0.75rem">${r.qid}</td>
+      <td>${r.val ?? '—'}</td>
+      <td style="color:#64748b;font-size:0.77rem">${r.raw.substring(0,90)}</td>
+    </tr>
+  `).join('');
+}
+
+function togglePersona(i) {
+  document.getElementById('persona'+i).classList.toggle('open');
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,160 @@
+\documentclass{beamer}
+\usetheme{Madrid}
+\usecolortheme{beaver}
+
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\setCJKmainfont{Microsoft YaHei}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric}
+
+\definecolor{codebg}{HTML}{F4F4F4}
+\definecolor{codekey}{HTML}{1B4F72}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekey}\bfseries,
+  breaklines=true,
+  frame=single,
+  framerule=0pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+}
+
+\title[Prism: Model Setup]{Prism: Setting Up Model Providers}
+\subtitle{Gemini Flash \& Claude Haiku}
+\author{涂皓 TU HOW}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Overview}
+  \tableofcontents
+\end{frame}
+
+\section{Model Architecture}
+
+\begin{frame}{How Prism Uses Models}
+  \begin{columns}
+    \column{0.5\textwidth}
+      \begin{block}{Agent Models}
+        \textbf{PRISM\_AGENT\_MODEL}\\[6pt]
+        Used for Agent 1 \& Agent 2\\
+        (reasoning, strategy)\\[6pt]
+        Default: \texttt{claude-sonnet-4-6}
+      \end{block}
+    \column{0.5\textwidth}
+      \begin{block}{Simulation Model}
+        \textbf{PRISM\_SIM\_MODEL}\\[6pt]
+        Used for bulk respondents\\
+        (high-volume, fast)\\[6pt]
+        Default: \texttt{gemini/gemini-2.0-flash}
+      \end{block}
+  \end{columns}
+  \vspace{10pt}
+  \centering
+  \alert{Switch models without touching code — just change the env var.}
+\end{frame}
+
+\section{Google Gemini Flash (Free)}
+
+\begin{frame}{Gemini Flash — Why Use It}
+  \begin{itemize}
+    \item \textbf{Free tier} — no billing setup, no credit card required
+    \pause
+    \item \textbf{Generous limits} — 15 RPM, 1M tokens/day
+    \pause
+    \item \textbf{Fast} — ideal for running 150+ simulation calls per study
+    \pause
+    \item \textbf{Education account} — you already have Gemini Pro access; AI Studio key is separate and free
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Gemini Flash — Setup Steps}
+  \begin{enumerate}
+    \item Go to \texttt{aistudio.google.com} and sign in
+    \pause
+    \item Click \textbf{Get API key} $\rightarrow$ \textbf{Create API key}
+    \pause
+    \item Copy the key (starts with \texttt{AIza...})
+    \pause
+    \item Add to your \texttt{.env} file:
+  \end{enumerate}
+  \vspace{6pt}
+\begin{lstlisting}[language=bash]
+GEMINI_API_KEY=AIzaSy...yourkey...
+PRISM_SIM_MODEL=gemini/gemini-2.0-flash
+\end{lstlisting}
+  \vspace{6pt}
+  \begin{exampleblock}{Note}
+    No credit card. No billing page. The free tier resets daily.
+  \end{exampleblock}
+\end{frame}
+
+\section{Claude Haiku (Fallback)}
+
+\begin{frame}[fragile]{Claude Haiku — Setup}
+  \begin{alertblock}{Good news}
+    Haiku uses the \textbf{same API key} as Claude Sonnet — already configured.
+  \end{alertblock}
+  \vspace{10pt}
+  Just change one line in \texttt{.env}:
+\begin{lstlisting}[language=bash]
+PRISM_SIM_MODEL=claude-haiku-4-5-20251001
+\end{lstlisting}
+  \vspace{10pt}
+  \begin{block}{When to use Haiku}
+    \begin{itemize}
+      \item Gemini free tier is exhausted for the day
+      \item You want fully consistent Anthropic outputs
+      \item Debugging — same provider as Agent 1/2
+    \end{itemize}
+  \end{block}
+\end{frame}
+
+\section{Configuration}
+
+\begin{frame}[fragile]{Your \texttt{.env} File}
+  Full example — drop this in the project root:
+\begin{lstlisting}[language=bash]
+# Anthropic (Agent 1, Agent 2, Haiku fallback)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Google (Gemini simulation)
+GEMINI_API_KEY=AIzaSy...
+
+# Model selection
+PRISM_AGENT_MODEL=claude-sonnet-4-6
+PRISM_SIM_MODEL=gemini/gemini-2.0-flash
+\end{lstlisting}
+  \vspace{6pt}
+  \alert{Never commit \texttt{.env} to git.} Add it to \texttt{.gitignore}.
+\end{frame}
+
+\begin{frame}{Quick Reference}
+  \centering
+  \begin{tabular}{lll}
+    \hline
+    \textbf{Scenario} & \textbf{PRISM\_SIM\_MODEL} & \textbf{Cost} \\
+    \hline
+    Default (recommended) & \texttt{gemini/gemini-2.0-flash} & Free \\
+    Anthropic-only & \texttt{claude-haiku-4-5-20251001} & Tokens \\
+    High quality sim & \texttt{claude-sonnet-4-6} & Higher \\
+    \hline
+  \end{tabular}
+  \vspace{14pt}
+  \begin{block}{Remember}
+    \texttt{PRISM\_AGENT\_MODEL} stays \texttt{claude-sonnet-4-6} in all scenarios.\\
+    Only the simulation model needs to change.
+  \end{block}
+\end{frame}
+
+\end{document}

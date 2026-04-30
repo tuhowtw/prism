@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+pandas
+streamlit
+plotly
+lxml
+anthropic
