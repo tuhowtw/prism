@@ -1,19 +1,18 @@
 """
 Prism Report Generator
-Reads smoke_raw_responses.jsonl and produces:
-  - prism_responses.db   (SQLite)
-  - prism_report.html    (browsable report)
+Reads a run .jsonl and produces matching .db (SQLite) + .html (browsable report).
 
-Run: python prism_report.py
+Run:
+  python prism_report.py                          # auto-picks latest in runs/
+  python prism_report.py smoke_raw_responses.jsonl  # explicit file
 """
-import json
-import sqlite3
-import re
+import json, sqlite3, re, sys
 from collections import defaultdict
 from pathlib import Path
 
-import sys
-
+# ---------------------------------------------------------------------------
+# Resolve input file
+# ---------------------------------------------------------------------------
 if len(sys.argv) > 1:
     JSONL = Path(sys.argv[1])
 else:
@@ -27,12 +26,12 @@ else:
 DB   = JSONL.parent / (JSONL.stem + ".db")
 HTML = JSONL.parent / (JSONL.stem + ".html")
 
-# Load matching _report.json if present
+# Load matching _report.json if present (same dir, same stem + _report)
 _report_path = JSONL.parent / (JSONL.stem + "_report.json")
 REPORT = json.loads(_report_path.read_text(encoding="utf-8")) if _report_path.exists() else None
 
 # ---------------------------------------------------------------------------
-# Load
+# Load JSONL
 # ---------------------------------------------------------------------------
 rows = []
 with open(JSONL, encoding="utf-8") as f:
@@ -46,11 +45,11 @@ conn = sqlite3.connect(DB)
 conn.execute("DROP TABLE IF EXISTS responses")
 conn.execute("""
     CREATE TABLE responses (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        segment       TEXT,
-        question_id   TEXT,
-        raw_response  TEXT,
-        parsed_value  TEXT
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        segment      TEXT,
+        question_id  TEXT,
+        raw_response TEXT,
+        parsed_value TEXT
     )
 """)
 conn.executemany(
@@ -60,36 +59,29 @@ conn.executemany(
 conn.execute("CREATE INDEX IF NOT EXISTS idx_seg_q ON responses(segment, question_id)")
 conn.commit()
 conn.close()
-print(f"DB written → {DB}  ({len(rows)} rows)")
+print(f"DB written -> {DB}  ({len(rows)} rows)")
 
 # ---------------------------------------------------------------------------
-# Aggregate for HTML
+# Aggregate helpers
 # ---------------------------------------------------------------------------
-# Group by (segment, question_id)
 by_seg_q = defaultdict(list)
 for r in rows:
     by_seg_q[(r["segment"], r["question_id"])].append(r)
 
-segments  = list(dict.fromkeys(r["segment"] for r in rows))
+segments  = list(dict.fromkeys(r["segment"]     for r in rows))
 questions = list(dict.fromkeys(r["question_id"] for r in rows))
 
 def mean(vals):
-    v = [float(x) for x in vals if x not in (None, "None", "")]
+    v = [float(x) for x in vals if x not in (None, "None", "") and re.match(r'^[\d.]+$', str(x))]
     return round(sum(v) / len(v), 2) if v else None
-
-def pct_yes(vals):
-    v = [x for x in vals if x in ("1", "0")]
-    return round(100 * sum(int(x) for x in v) / len(v), 1) if v else None
 
 def is_numeric(vals):
     count = sum(1 for v in vals if v not in (None, "None", "") and re.match(r'^[\d.]+$', str(v)))
     return count > len(vals) * 0.5
 
-# Detect SDB pairs
 def base_name(qid):
     s = re.sub(r'^q\d+_', '', qid)
-    s = re.sub(r'_(anon|named)$', '', s)
-    return s
+    return re.sub(r'_(anon|named)$', '', s)
 
 anon_qs  = [q for q in questions if q.endswith("_anon")]
 named_qs = [q for q in questions if q.endswith("_named")]
@@ -100,151 +92,226 @@ for aq in anon_qs:
         sdb_pairs[base_name(aq)] = (aq, match)
 
 # ---------------------------------------------------------------------------
-# HTML
+# HTML helpers
 # ---------------------------------------------------------------------------
 def esc(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
 
-def color_gap(gap):
+def gap_style(gap):
     if gap is None: return ""
-    r = min(255, int(abs(gap) / 4 * 200))
-    return f"background:#ff{255-r:02x}{255-r:02x}" if gap > 0 else f"background:#ffffff"
+    intensity = min(200, int(abs(gap) / 4 * 200))
+    return f"background:rgb(255,{255-intensity},{255-intensity})" if gap > 0 else ""
 
-rows_html = []
-for r in rows:
-    rows_html.append(f"""<tr class="r-row" data-seg="{esc(r['segment'])}" data-q="{esc(r['question_id'])}">
-      <td>{esc(r['segment'])}</td>
-      <td>{esc(r['question_id'])}</td>
-      <td>{esc(r['raw_response'])}</td>
-      <td>{esc(r['parsed_value'])}</td>
-    </tr>""")
-
-# SDB gap table rows
+# SDB gap rows
 sdb_rows = []
 for pair_base, (aq, nq) in sdb_pairs.items():
-    sdb_rows.append(f"<tr><th colspan='2'>{esc(pair_base)}</th></tr>")
+    sdb_rows.append(f"<tr><th colspan='3' style='background:#c5cae9'>{esc(pair_base)}</th></tr>")
+    sdb_rows.append("<tr><th>Segment</th><th>Anon mean</th><th>Named mean</th></tr>")
     for seg in segments:
-        anon_vals = [r["parsed_value"] for r in by_seg_q[(seg, aq)]]
-        named_vals = [r["parsed_value"] for r in by_seg_q[(seg, nq)]]
-        a_mean = mean(anon_vals)
-        n_mean = mean(named_vals)
-        gap = round(a_mean - n_mean, 2) if a_mean and n_mean else None
+        a = mean([r["parsed_value"] for r in by_seg_q[(seg, aq)]])
+        n = mean([r["parsed_value"] for r in by_seg_q[(seg, nq)]])
+        gap = round(a - n, 2) if a is not None and n is not None else None
         bar = "|" * int(abs(gap) * 4) if gap else ""
-        style = color_gap(gap)
-        sdb_rows.append(f'<tr style="{style}"><td>{esc(seg)}</td>'
-                        f'<td>anon={a_mean} | named={n_mean} | <b>gap={gap:+.2f}</b> {bar}</td></tr>')
+        style = gap_style(gap)
+        gap_str = f"<b>{gap:+.2f}</b> {bar}" if gap is not None else "—"
+        sdb_rows.append(f'<tr style="{style}"><td>{esc(seg)}</td><td>{a}</td>'
+                        f'<td>{n} &nbsp; gap={gap_str}</td></tr>')
 
 # Per-question summary rows
 q_summary_rows = []
 for qid in questions:
-    q_summary_rows.append(f"<tr><th colspan='{len(segments)+1}'>{esc(qid)}</th></tr>")
-    header = "<tr><td><b>metric</b></td>" + "".join(f"<td><b>{esc(s)}</b></td>" for s in segments) + "</tr>"
-    q_summary_rows.append(header)
-
-    # mean (if numeric)
+    q_summary_rows.append(f"<tr><th colspan='{len(segments)+1}' style='background:#c5cae9'>{esc(qid)}</th></tr>")
+    q_summary_rows.append("<tr><td><b>metric</b></td>" +
+                          "".join(f"<td><b>{esc(s)}</b></td>" for s in segments) + "</tr>")
     all_vals = [r["parsed_value"] for r in by_seg_q.get((segments[0], qid), [])]
     if is_numeric(all_vals):
-        means = []
+        cells = []
         for seg in segments:
-            vals = [r["parsed_value"] for r in by_seg_q[(seg, qid)]]
-            m = mean(vals)
-            means.append(f"<td>{m}/5</td>" if m else "<td>—</td>")
-        q_summary_rows.append("<tr><td>mean</td>" + "".join(means) + "</tr>")
+            m = mean([r["parsed_value"] for r in by_seg_q[(seg, qid)]])
+            cells.append(f"<td>{m}</td>" if m is not None else "<td>—</td>")
+        q_summary_rows.append("<tr><td>mean</td>" + "".join(cells) + "</tr>")
     else:
-        # open-ended: show sample
         for seg in segments:
-            cell_rows = by_seg_q[(seg, qid)]
-            sample = cell_rows[0]["raw_response"][:120] if cell_rows else "—"
-            q_summary_rows.append(f'<tr><td>{esc(seg)}</td><td colspan="{len(segments)}">{esc(sample)}</td></tr>')
+            cell = by_seg_q[(seg, qid)]
+            sample = esc(cell[0]["raw_response"][:120]) if cell else "—"
+            q_summary_rows.append(f'<tr><td>{esc(seg)}</td>'
+                                  f'<td colspan="{len(segments)}">{sample}</td></tr>')
+
+# Raw response rows
+rows_html = []
+for r in rows:
+    rows_html.append(
+        f'<tr class="r-row" data-seg="{esc(r["segment"])}" data-q="{esc(r["question_id"])}">'
+        f'<td>{esc(r["segment"])}</td><td>{esc(r["question_id"])}</td>'
+        f'<td>{esc(r["raw_response"])}</td><td>{esc(r["parsed_value"])}</td></tr>'
+    )
 
 seg_options = "".join(f'<option value="{esc(s)}">{esc(s)}</option>' for s in segments)
 q_options   = "".join(f'<option value="{esc(q)}">{esc(q)}</option>' for q in questions)
 
+# Agent 2 block
+if REPORT:
+    a2 = REPORT["agent2"]
+    score   = esc(str(a2["overall_summary"].get("weighted_reception_score", "—")))
+    insight = esc(a2["overall_summary"].get("key_insight", ""))
+    target  = esc(a2["target_segment"])
+    recs    = "".join(f'<tr><td style="width:2rem;font-weight:bold;text-align:center">{i}</td>'
+                      f'<td>{esc(r)}</td></tr>'
+                      for i, r in enumerate(a2["recommendations"], 1))
+    flags   = "".join(f'<tr><td style="color:#b71c1c">(!) {esc(f)}</td></tr>'
+                      for f in a2["risk_flags"])
+    agent2_block = f"""
+<section id="s-agent2">
+<h2>Agent 2 — Strategic Analysis</h2>
+<div class="section">
+  <table style="margin-bottom:14px">
+    <tr><th style="width:130px">Overall Score</th><td><b>{score} / 5</b></td></tr>
+    <tr><th>Key Insight</th><td>{insight}</td></tr>
+    <tr><th>Target Segment</th><td>{target}</td></tr>
+  </table>
+  <table style="margin-bottom:14px">
+    <thead><tr><th colspan="2">Recommendations</th></tr></thead>
+    <tbody>{recs}</tbody>
+  </table>
+  <table>
+    <thead><tr><th>Risk Flags</th></tr></thead>
+    <tbody>{flags}</tbody>
+  </table>
+</div>
+</section>"""
+    toc_agent2 = '<a href="#s-agent2">Agent 2 Analysis</a>'
+else:
+    agent2_block = ""
+    toc_agent2   = '<a style="opacity:.4" title="No _report.json found">Agent 2 (unavailable)</a>'
+
+toc_segs = "".join(
+    f'<a href="#s-raw" class="toc-filter" data-seg="{esc(s)}">{esc(s)}</a>'
+    for s in segments
+)
+toc_qs = "".join(
+    f'<a href="#s-raw" class="toc-filter" data-q="{esc(q)}">{esc(q)}</a>'
+    for q in questions
+)
+
+# ---------------------------------------------------------------------------
+# Write HTML
+# ---------------------------------------------------------------------------
 html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Prism — Piracy SDB Report</title>
+<title>Prism Report — {esc(JSONL.name)}</title>
 <style>
-  body {{ font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }}
-  h1 {{ background: #1a1a2e; color: #eee; margin: 0; padding: 16px 24px; font-size: 1.2rem; }}
-  h2 {{ background: #16213e; color: #ccc; margin: 0; padding: 10px 24px; font-size: 1rem; }}
-  .section {{ padding: 20px 24px; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; background: #fff; }}
-  th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: left; vertical-align: top; }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: system-ui, sans-serif; background: #f0f2f5; color: #222;
+          display: flex; flex-direction: column; height: 100vh; overflow: hidden; }}
+
+  /* Top bar */
+  #topbar {{ background: #1a1a2e; color: #eee; padding: 10px 18px;
+             font-size: 0.95rem; font-weight: bold; flex-shrink: 0; }}
+
+  /* Layout */
+  #layout {{ display: flex; flex: 1; overflow: hidden; }}
+
+  /* Sidebar TOC */
+  #toc {{ width: 210px; min-width: 210px; background: #1e2a3a; color: #aac;
+          overflow-y: auto; padding-bottom: 20px; flex-shrink: 0; }}
+  #toc .toc-label {{ padding: 10px 14px 4px; font-size: 0.68rem;
+                     text-transform: uppercase; color: #556; letter-spacing: .08em; }}
+  #toc a {{ display: block; padding: 6px 14px; color: #8ab; text-decoration: none;
+             font-size: 0.8rem; border-left: 3px solid transparent;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  #toc a:hover {{ background: #243447; color: #fff; border-left-color: #5b8dee; }}
+  #toc a.active {{ background: #1a3050; color: #fff; border-left-color: #5b8dee; }}
+
+  /* Main scrollable area */
+  #main {{ flex: 1; overflow-y: auto; overflow-x: auto; }}
+  section {{ scroll-margin-top: 4px; }}
+  h2 {{ background: #16213e; color: #ccc; padding: 9px 18px; font-size: 0.9rem;
+        position: sticky; top: 0; z-index: 10; }}
+  .section {{ padding: 14px 18px; }}
+
+  /* Tables */
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.82rem; background: #fff; }}
+  th, td {{ border: 1px solid #ddd; padding: 5px 9px; text-align: left; vertical-align: top; }}
   th {{ background: #e8eaf6; }}
   tr:hover td {{ background: #f0f4ff; }}
-  .controls {{ padding: 12px 24px; background: #fff; border-bottom: 1px solid #ddd; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
-  select, input {{ padding: 6px 10px; border: 1px solid #bbb; border-radius: 4px; font-size: 0.9rem; }}
-  .count {{ font-size: 0.85rem; color: #666; }}
-  .tag {{ display: inline-block; background: #e3f2fd; border-radius: 3px; padding: 1px 6px; font-size: 0.75rem; margin-left: 4px; }}
+
+  /* Raw controls */
+  .controls {{ padding: 8px 18px; background: #fff; border-bottom: 1px solid #ddd;
+               display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+               position: sticky; top: 34px; z-index: 9; }}
+  select, input {{ padding: 4px 8px; border: 1px solid #bbb; border-radius: 4px; font-size: 0.85rem; }}
+  .count {{ font-size: 0.8rem; color: #666; }}
 </style>
 </head>
 <body>
-<h1>Prism — Piracy SDB Study · Raw Response Report</h1>
+<div id="topbar">Prism &mdash; Piracy SDB Report &nbsp;|&nbsp; {esc(JSONL.name)} &nbsp;|&nbsp; {len(rows)} responses</div>
+<div id="layout">
 
-{"" if not REPORT else f"""
-<h2>0. Agent 2 — Strategic Analysis</h2>
-<div class="section">
-  <table>
-    <tr><th>Overall Score</th><td>{esc(str(REPORT['agent2']['overall_summary'].get('weighted_reception_score', '—')))}/5</td></tr>
-    <tr><th>Key Insight</th><td>{esc(REPORT['agent2']['overall_summary'].get('key_insight', ''))}</td></tr>
-    <tr><th>Target Segment</th><td>{esc(REPORT['agent2']['target_segment'])}</td></tr>
-  </table>
-  <br>
-  <table>
-    <thead><tr><th>#</th><th>Recommendation</th></tr></thead>
-    <tbody>{''.join(f"<tr><td>{i}</td><td>{esc(r)}</td></tr>" for i, r in enumerate(REPORT['agent2']['recommendations'], 1))}</tbody>
-  </table>
-  <br>
-  <table>
-    <thead><tr><th>Risk Flags</th></tr></thead>
-    <tbody>{''.join(f"<tr><td>(!) {esc(f)}</td></tr>" for f in REPORT['agent2']['risk_flags'])}</tbody>
-  </table>
-</div>
-"""}
+<nav id="toc">
+  <div class="toc-label">Sections</div>
+  {toc_agent2}
+  <a href="#s-sdb">SDB Gaps</a>
+  <a href="#s-summary">Q Summary</a>
+  <a href="#s-raw">Raw Responses</a>
+  <div class="toc-label">Filter by Segment</div>
+  {toc_segs}
+  <div class="toc-label">Filter by Question</div>
+  {toc_qs}
+</nav>
 
-<h2>1. Social Desirability Bias Gaps</h2>
+<div id="main">
+
+{agent2_block}
+
+<section id="s-sdb">
+<h2>SDB Gaps &mdash; anonymous vs named disclosure</h2>
 <div class="section">
 <table>
-  <thead><tr><th>Segment</th><th>anon vs named (gap = anon − named)</th></tr></thead>
   <tbody>{''.join(sdb_rows)}</tbody>
 </table>
 </div>
+</section>
 
-<h2>2. Per-Question Segment Summary</h2>
+<section id="s-summary">
+<h2>Per-Question Segment Summary</h2>
 <div class="section">
 <table>
   <thead><tr><th>Question / Metric</th>{''.join(f'<th>{esc(s)}</th>' for s in segments)}</tr></thead>
   <tbody>{''.join(q_summary_rows)}</tbody>
 </table>
 </div>
+</section>
 
-<h2>3. Raw Responses ({len(rows)} total)</h2>
+<section id="s-raw">
+<h2>Raw Responses</h2>
 <div class="controls">
-  <label>Segment: <select id="seg-filter"><option value="">All</option>{seg_options}</select></label>
-  <label>Question: <select id="q-filter"><option value="">All</option>{q_options}</select></label>
-  <label>Search raw: <input id="search" type="text" placeholder="keyword..." style="width:200px"></label>
-  <span class="count" id="count">{len(rows)} rows shown</span>
+  <label>Segment <select id="seg-filter"><option value="">All</option>{seg_options}</select></label>
+  <label>Question <select id="q-filter"><option value="">All</option>{q_options}</select></label>
+  <label>Search <input id="search" type="text" placeholder="keyword..." style="width:160px"></label>
+  <span class="count" id="count">{len(rows)} shown</span>
 </div>
 <div class="section" style="padding-top:0">
-<table id="raw-table">
+<table>
   <thead><tr><th>Segment</th><th>Question</th><th>Raw Response</th><th>Parsed</th></tr></thead>
   <tbody>{''.join(rows_html)}</tbody>
 </table>
 </div>
+</section>
+
+</div><!-- #main -->
+</div><!-- #layout -->
 
 <script>
 const segF  = document.getElementById('seg-filter');
 const qF    = document.getElementById('q-filter');
 const srch  = document.getElementById('search');
-const count = document.getElementById('count');
+const countEl = document.getElementById('count');
 const allRows = Array.from(document.querySelectorAll('.r-row'));
 
 function filter() {{
-  const seg = segF.value;
-  const q   = qF.value;
-  const kw  = srch.value.toLowerCase();
+  const seg = segF.value, q = qF.value, kw = srch.value.toLowerCase();
   let n = 0;
   allRows.forEach(row => {{
     const show = (!seg || row.dataset.seg === seg)
@@ -253,16 +320,41 @@ function filter() {{
     row.style.display = show ? '' : 'none';
     if (show) n++;
   }});
-  count.textContent = n + ' rows shown';
+  countEl.textContent = n + ' shown';
 }}
 
 segF.addEventListener('change', filter);
 qF.addEventListener('change', filter);
 srch.addEventListener('input', filter);
+
+// TOC filter links
+document.querySelectorAll('.toc-filter').forEach(a => {{
+  a.addEventListener('click', e => {{
+    e.preventDefault();
+    const seg = a.dataset.seg || '', q = a.dataset.q || '';
+    if (seg) segF.value = seg;
+    if (q)   qF.value   = q;
+    filter();
+    document.getElementById('s-raw').scrollIntoView({{behavior:'smooth'}});
+  }});
+}});
+
+// Highlight active TOC link on scroll
+const sections = document.querySelectorAll('section[id]');
+const tocLinks = document.querySelectorAll('#toc a[href^="#s-"]');
+const observer = new IntersectionObserver(entries => {{
+  entries.forEach(e => {{
+    if (e.isIntersecting) {{
+      tocLinks.forEach(l => l.classList.remove('active'));
+      const active = document.querySelector('#toc a[href="#' + e.target.id + '"]');
+      if (active) active.classList.add('active');
+    }}
+  }});
+}}, {{root: document.getElementById('main'), threshold: 0.2}});
+sections.forEach(s => observer.observe(s));
 </script>
 </body>
 </html>"""
 
 HTML.write_text(html, encoding="utf-8")
-print(f"HTML written → {HTML}")
-print("Open prism_report.html in browser.")
+print(f"HTML written -> {HTML}")

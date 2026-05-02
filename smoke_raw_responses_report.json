@@ -1,0 +1,31 @@
+{
+  "run_file": "smoke_raw_responses.jsonl",
+  "timestamp": "20260502_n20",
+  "n_per_cell": 20,
+  "sdb_gaps": {
+    "q_piracy": {
+      "Budget-conscious Student": 3.20,
+      "Value-Conscious Worker": 3.05,
+      "Family-Focused Parent": 1.65,
+      "Urban Tech-Savvy Professional": 1.50
+    }
+  },
+  "agent2": {
+    "overall_summary": {
+      "weighted_reception_score": 3.3,
+      "key_insight": "Despite varying WTP and ethical stances, high prices, content unavailability, and convenience issues are universal drivers of digital piracy in Taiwan, with significant underreporting of actual piracy behavior across all segments due to social desirability bias."
+    },
+    "target_segment": "Urban Tech-Savvy Professional",
+    "recommendations": [
+      "Implement tiered pricing models, especially for Budget-conscious Students (WTP NT$352.5) and Value-Conscious Workers (WTP NT$267.5), potentially offering student/low-income discounts or freemium options to convert high-frequency pirates into legal subscribers, as cost is a universal barrier.",
+      "Prioritize securing broader content licenses to address the 100% reported 'Content not available legally in Taiwan' driver across all segments, thereby removing a key justification for piracy.",
+      "Enhance the convenience and user experience of legal platforms, particularly for streaming and software, to match or exceed the ease of access offered by unauthorized content, which is a 100% driver for students, tech-savvy professionals, and value-conscious workers.",
+      "Develop bundled subscription packages for Family-Focused Parents (WTP NT$792.5) to address their concern about balancing the cost of multiple legal services, leveraging their high trust (5.0/5) and guilt (4.95/5) regarding piracy.",
+      "Launch targeted educational campaigns for Budget-conscious Students and Value-Conscious Workers, focusing on the value proposition of legal content (currently rated 1.95/5 and 2.75/5 respectively) and the ethical implications, as these segments show the lowest ethical concerns and highest SDB."
+    ],
+    "risk_flags": [
+      "The social desirability bias (SDB) gap is substantial across all segments, with Budget-conscious Students (+3.20) and Value-Conscious Workers (+3.05) showing the largest discrepancies between anonymous and named piracy disclosures. Actual piracy rates are significantly higher than self-reported figures in non-anonymous settings.",
+      "The universal drivers of piracy — high price of legal options (100% across all segments) and content not available legally in Taiwan (100% across all segments) — present fundamental structural challenges that, if unaddressed, will continue to fuel unauthorized consumption regardless of segment-specific WTP or ethical considerations."
+    ]
+  }
+}
