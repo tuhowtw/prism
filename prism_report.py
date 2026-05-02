@@ -24,8 +24,12 @@ else:
     JSONL = runs[-1]
     print(f"Using latest run: {JSONL}")
 
-DB   = Path(JSONL.stem + ".db")
-HTML = Path(JSONL.stem + ".html")
+DB   = JSONL.parent / (JSONL.stem + ".db")
+HTML = JSONL.parent / (JSONL.stem + ".html")
+
+# Load matching _report.json if present
+_report_path = JSONL.parent / (JSONL.stem + "_report.json")
+REPORT = json.loads(_report_path.read_text(encoding="utf-8")) if _report_path.exists() else None
 
 # ---------------------------------------------------------------------------
 # Load
@@ -178,6 +182,27 @@ html = f"""<!DOCTYPE html>
 </head>
 <body>
 <h1>Prism — Piracy SDB Study · Raw Response Report</h1>
+
+{"" if not REPORT else f"""
+<h2>0. Agent 2 — Strategic Analysis</h2>
+<div class="section">
+  <table>
+    <tr><th>Overall Score</th><td>{esc(str(REPORT['agent2']['overall_summary'].get('weighted_reception_score', '—')))}/5</td></tr>
+    <tr><th>Key Insight</th><td>{esc(REPORT['agent2']['overall_summary'].get('key_insight', ''))}</td></tr>
+    <tr><th>Target Segment</th><td>{esc(REPORT['agent2']['target_segment'])}</td></tr>
+  </table>
+  <br>
+  <table>
+    <thead><tr><th>#</th><th>Recommendation</th></tr></thead>
+    <tbody>{''.join(f"<tr><td>{i}</td><td>{esc(r)}</td></tr>" for i, r in enumerate(REPORT['agent2']['recommendations'], 1))}</tbody>
+  </table>
+  <br>
+  <table>
+    <thead><tr><th>Risk Flags</th></tr></thead>
+    <tbody>{''.join(f"<tr><td>(!) {esc(f)}</td></tr>" for f in REPORT['agent2']['risk_flags'])}</tbody>
+  </table>
+</div>
+"""}
 
 <h2>1. Social Desirability Bias Gaps</h2>
 <div class="section">

@@ -134,6 +134,35 @@ print("\n  Risk flags:")
 for f in output.risk_flags:
     print(f"    (!) {f}")
 
+# Save Agent 2 report alongside the run file
+_report = {
+    "run_file": str(_run_file),
+    "timestamp": _ts,
+    "n_per_cell": RESPONSES_PER_CELL,
+    "segments": [{"name": s.name, "weight": s.weight} for s in segments],
+    "questions": [{"id": q.id, "text": q.text, "type": q.type, "condition": q.condition} for q in questions],
+    "sdb_gaps": {
+        pair_prefix: {seg_name: gap for seg_name, gap in seg_gaps}
+        for pair_prefix, seg_gaps in all_gaps.items()
+    },
+    "segment_stats": {
+        sr.segment.name: {
+            qid: stats for qid, stats in sr.question_summaries.items()
+        }
+        for sr in seg_results
+    },
+    "agent2": {
+        "overall_summary": output.overall_summary,
+        "target_segment": output.target_segment,
+        "recommendations": output.recommendations,
+        "risk_flags": output.risk_flags,
+    },
+}
+_report_file = _runs_dir / f"{_ts}_n{RESPONSES_PER_CELL}_report.json"
+with open(_report_file, "w", encoding="utf-8") as _f:
+    _json.dump(_report, _f, ensure_ascii=False, indent=2)
+print(f"  Report saved → {_report_file}")
+
 print()
 print("=" * 70)
 print("SMOKE DONE")
