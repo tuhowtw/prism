@@ -16,3 +16,18 @@ __pycache__/
 .vscode/
 .streamlit/
 .claude/
+
+# generated outputs
+runs/
+*.db
+*.html
+*.jsonl
+smoke_raw_responses.jsonl
+
+# misc untracked dirs
+customer-survey-designer.zip
+data/
+fred_prac/
+guide_lecture/
+literature/
+prism-progress-report.tex

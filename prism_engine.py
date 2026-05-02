@@ -52,8 +52,10 @@ class Segment:
 class SurveyQuestion:
     id: str
     text: str
-    type: str              # "likert5" | "binary" | "wtp" | "open"
+    type: str              # "likert5" | "binary" | "wtp" | "open" | "multi_select"
     scale_label: str = ""  # e.g. "1=Strongly Disagree, 5=Strongly Agree"
+    options: list = field(default_factory=list)   # for multi_select
+    condition: str = "neutral"                    # "neutral" | "anonymous" | "named"
 
 @dataclass
 class SimulatedResponse:
@@ -83,18 +85,27 @@ class AnalysisOutput:
 # ---------------------------------------------------------------------------
 
 def _chat(model: str, system: str, user: str, max_tokens: int = 2048, temperature: float = 0.7) -> str:
-    """Synchronous single-turn chat via LiteLLM."""
+    """Synchronous single-turn chat via LiteLLM with retry on 429."""
+    import time
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    response = litellm.completion(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return response.choices[0].message.content.strip()
+    delay = 20.0
+    for attempt in range(8):
+        try:
+            response = litellm.completion(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content.strip()
+        except litellm.exceptions.RateLimitError:
+            if attempt == 7:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 1.5, 120.0)
 
 
 async def _achat(model: str, system: str, user: str, max_tokens: int = 256, temperature: float = 1.0) -> str:
@@ -113,9 +124,12 @@ async def _achat(model: str, system: str, user: str, max_tokens: int = 256, temp
 
 
 def _strip_json(raw: str) -> dict:
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+    # Find the outermost JSON object even if wrapped in markdown fences or prose
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError(f"No JSON object found in response:\n{raw[:500]}")
+    return json.loads(raw[start:end + 1])
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +149,20 @@ Focus your questions on:
 Ask all 3 questions in a single, numbered list. Do not generate personas or survey
 questions yet — only ask for clarification.
 """
+
+_CONDITION_PREFIX = {
+    "anonymous": (
+        "IMPORTANT CONTEXT: This response is collected fully anonymously. "
+        "No name, IP address, or identifying metadata will ever be linked to your answer. "
+        "Be completely honest.\n\n"
+    ),
+    "named": (
+        "IMPORTANT CONTEXT: Your real name and ID will be recorded alongside this response "
+        "and may be reviewed by authorities or made public. "
+        "Answer as you would in a formal, non-anonymous setting.\n\n"
+    ),
+    "neutral": "",
+}
 
 
 def run_agent1_clarify(input_text: str) -> str:
@@ -171,42 +199,68 @@ Your output must be ONLY valid JSON in this exact schema (no markdown fences, no
       "id": "q1",
       "text": "question text",
       "type": "likert5",
-      "scale_label": "1=Strongly Disagree, 5=Strongly Agree"
+      "scale_label": "1=Strongly Disagree, 5=Strongly Agree",
+      "options": [],
+      "condition": "neutral"
     },
     {
-      "id": "q2",
-      "text": "question text",
+      "id": "q_behavior_anon",
+      "text": "How often do you use pirated/unauthorized digital content?",
       "type": "likert5",
-      "scale_label": "1=Strongly Disagree, 5=Strongly Agree"
+      "scale_label": "1=Never, 5=Very Often",
+      "options": [],
+      "condition": "anonymous"
     },
     {
-      "id": "q3",
-      "text": "question text",
-      "type": "binary",
-      "scale_label": "Answer yes or no"
+      "id": "q_behavior_named",
+      "text": "How often do you use pirated/unauthorized digital content?",
+      "type": "likert5",
+      "scale_label": "1=Never, 5=Very Often",
+      "options": [],
+      "condition": "named"
     },
     {
-      "id": "q4",
-      "text": "How much would you be willing to pay (in NT$) for [key feature]?",
+      "id": "q_drivers",
+      "text": "Why do you choose unauthorized content over paid alternatives? Select all that apply.",
+      "type": "multi_select",
+      "scale_label": "",
+      "options": ["Price too high", "Content unavailable legally", "Convenience", "Peer influence", "Copyright laws unfair", "No perceived harm"],
+      "condition": "neutral"
+    },
+    {
+      "id": "q_wtp",
+      "text": "What is the maximum monthly subscription fee (in NT$) at which you would switch fully to legal content?",
       "type": "wtp",
-      "scale_label": "Respond with a number only, in NT$"
+      "scale_label": "Respond with a number only, in NT$. If you would never switch, reply 0.",
+      "options": [],
+      "condition": "neutral"
     },
     {
-      "id": "q5",
-      "text": "In 1-2 sentences, what is your main concern or hope about [topic]?",
+      "id": "q_open",
+      "text": "In 1-2 sentences, what is your main concern or hope about digital content access and piracy?",
       "type": "open",
-      "scale_label": ""
+      "scale_label": "",
+      "options": [],
+      "condition": "neutral"
     }
   ]
 }
 
 Rules:
 - Use 3 to 5 segments. Weights must sum to exactly 1.0.
+- Generate 12 to 15 questions total.
 - Prefer Likert-5 questions (quantifiable, supports statistical inference).
-- Always end with exactly one open-ended question (type: "open").
+- REQUIRED: Include exactly one matched pair of questions measuring the SAME underlying behavior,
+  one with condition "anonymous" and one with condition "named". Their ids MUST end with
+  "_anon" and "_named" respectively (same prefix). This is the social-desirability bias pair.
+- REQUIRED: Include at least one "multi_select" question with 4-6 options in the "options" array.
+  Respondents pick all that apply; reply format is comma-separated option letters (A, B, C...).
+- REQUIRED: End with exactly one question of type "open".
+- All other questions use condition "neutral".
 - Persona descriptions must be vivid and realistic (2-4 sentences), written in second person.
 - Questions must be directly relevant to the specific product/policy described.
 - Do not use generic or placeholder text.
+- The example questions above are illustrative only — replace them with questions relevant to the input.
 """
 
 
@@ -216,7 +270,7 @@ def run_agent1_propose(input_text: str, clarifications: str = "") -> tuple[list[
     if clarifications:
         user_content += f"\n\nClarification Answers:\n{clarifications}"
 
-    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content)
+    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content, max_tokens=8192)
     data = _strip_json(raw)
 
     segments = [
@@ -234,6 +288,8 @@ def run_agent1_propose(input_text: str, clarifications: str = "") -> tuple[list[
             text=q["text"],
             type=q["type"],
             scale_label=q.get("scale_label", ""),
+            options=q.get("options", []),
+            condition=q.get("condition", "neutral"),
         )
         for q in data["questions"]
     ]
@@ -250,25 +306,36 @@ def run_agent1(input_text: str) -> tuple[list[Segment], list[SurveyQuestion]]:
 # ---------------------------------------------------------------------------
 
 def _build_question_instruction(q: SurveyQuestion) -> str:
+    prefix = _CONDITION_PREFIX.get(q.condition, "")
     if q.type == "likert5":
-        return (
+        body = (
             f"{q.text}\n"
             f"Rate on a scale of 1 to 5. {q.scale_label}. "
             f"Reply with a single integer (1, 2, 3, 4, or 5) and nothing else."
         )
     elif q.type == "binary":
-        return (
+        body = (
             f"{q.text}\n"
             f"{q.scale_label}. Reply with exactly 'yes' or 'no' and nothing else."
         )
     elif q.type == "wtp":
-        return (
+        body = (
             f"{q.text}\n"
             f"{q.scale_label}. Reply with a number only (no currency symbol, no text). "
             f"If you would not pay anything, reply with 0."
         )
+    elif q.type == "multi_select":
+        letters = [chr(ord("A") + i) for i in range(len(q.options))]
+        option_lines = "\n".join(f"  {l}: {o}" for l, o in zip(letters, q.options))
+        body = (
+            f"{q.text}\n"
+            f"Options:\n{option_lines}\n"
+            f"Reply with the letters of ALL options that apply, comma-separated (e.g. A,C,E). "
+            f"Reply with letters only, no other text."
+        )
     else:
-        return f"{q.text}\nAnswer in 1-2 sentences. Be honest and specific."
+        body = f"{q.text}\nAnswer in 1-2 sentences. Be honest and specific."
+    return prefix + body
 
 
 def _parse_response(q: SurveyQuestion, raw: str) -> Any:
@@ -285,6 +352,16 @@ def _parse_response(q: SurveyQuestion, raw: str) -> Any:
     elif q.type == "wtp":
         match = re.search(r"\d[\d,]*", text)
         return float(match.group().replace(",", "")) if match else None
+    elif q.type == "multi_select":
+        letters = [chr(ord("A") + i) for i in range(len(q.options))]
+        selected = []
+        for letter in re.findall(r"[A-Za-z]", raw):
+            ul = letter.upper()
+            if ul in letters:
+                idx = ord(ul) - ord("A")
+                if idx < len(q.options):
+                    selected.append(q.options[idx])
+        return selected if selected else None
     else:
         return raw.strip()
 
@@ -360,10 +437,27 @@ def _aggregate_responses(
     questions: list[SurveyQuestion],
 ) -> list[SegmentResult]:
     seg_map = {s.name: s for s in segments}
+    q_map = {q.id: q for q in questions}
 
     by_seg_q: dict[tuple[str, str], list[SimulatedResponse]] = {}
     for r in responses:
         by_seg_q.setdefault((r.segment_name, r.question_id), []).append(r)
+
+    # Find SDB-paired question ids: ids ending in _anon/_named
+    # Match on stripped base name (remove leading q{N}_ and trailing _anon/_named)
+    def _base(qid: str) -> str:
+        s = re.sub(r'^q\d+_', '', qid)   # strip leading q1_, q3_, etc.
+        s = re.sub(r'_(anon|named)$', '', s)
+        return s
+
+    named_ids = {q.id for q in questions if q.id.endswith("_named")}
+    anon_ids  = {q.id for q in questions if q.id.endswith("_anon")}
+    sdb_pairs: list[tuple[str, str]] = []
+    for aid in anon_ids:
+        base_a = _base(aid)
+        match = next((nid for nid in named_ids if _base(nid) == base_a), None)
+        if match:
+            sdb_pairs.append((aid, match))
 
     segment_results = []
     for seg in segments:
@@ -380,6 +474,7 @@ def _aggregate_responses(
                     q_summaries[q.id] = {
                         "type": q.type,
                         "question": q.text,
+                        "condition": q.condition,
                         "n": len(numeric),
                         "mean": round(sum(numeric) / len(numeric), 2),
                         "min": round(min(numeric), 2),
@@ -390,11 +485,39 @@ def _aggregate_responses(
                     q_summaries[q.id] = {
                         "type": "binary",
                         "question": q.text,
+                        "condition": q.condition,
                         "n": len(values),
                         "pct_yes": round(100 * sum(values) / len(values), 1),
                     }
+            elif q.type == "multi_select":
+                all_lists = [v for v in values if isinstance(v, list)]
+                if all_lists:
+                    all_opts = q_map[q.id].options
+                    rates = {}
+                    for opt in all_opts:
+                        count = sum(1 for lst in all_lists if opt in lst)
+                        rates[opt] = round(100 * count / len(all_lists), 1)
+                    q_summaries[q.id] = {
+                        "type": "multi_select",
+                        "question": q.text,
+                        "condition": q.condition,
+                        "n": len(all_lists),
+                        "rates": rates,
+                    }
             else:
                 open_themes.extend(r.raw_response for r in cell if r.raw_response)
+
+        # Compute SDB gaps for this segment
+        sdb_gaps: dict[str, float] = {}
+        for aid, nid in sdb_pairs:
+            anon_stats = q_summaries.get(aid)
+            named_stats = q_summaries.get(nid)
+            if anon_stats and named_stats and "mean" in anon_stats and "mean" in named_stats:
+                gap = round(anon_stats["mean"] - named_stats["mean"], 2)
+                prefix = aid[:-5]
+                sdb_gaps[prefix] = gap
+        if sdb_gaps:
+            q_summaries["__sdb_gaps__"] = sdb_gaps
 
         segment_results.append(SegmentResult(
             segment=seg_map[seg.name],
@@ -428,6 +551,8 @@ Return ONLY valid JSON with this schema (no markdown fences):
 }
 
 Be specific and ground every recommendation in the data. Do not be generic.
+If the data contains paired anonymous/named questions, comment explicitly on the size
+of the social desirability gap and which segments hide their behavior most.
 """
 
 
@@ -440,21 +565,32 @@ def run_agent2(
     for sr in segment_results:
         summary_lines.append(f"\nSegment: {sr.segment.name} (weight={sr.segment.weight:.0%})")
         for qid, stats in sr.question_summaries.items():
+            if qid == "__sdb_gaps__":
+                for pair_prefix, gap in stats.items():
+                    summary_lines.append(f"  [SDB gap: {pair_prefix}] anon-named mean diff = {gap:+.2f} (positive = higher disclosure when anonymous)")
+                continue
             q_text = stats.get("question", qid)
+            cond = stats.get("condition", "neutral")
+            cond_tag = f" [{cond}]" if cond != "neutral" else ""
             if stats["type"] == "likert5":
-                summary_lines.append(f"  [{qid}] {q_text[:60]} -> mean={stats['mean']}/5 (n={stats['n']})")
+                summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> mean={stats['mean']}/5 (n={stats['n']})")
             elif stats["type"] == "binary":
-                summary_lines.append(f"  [{qid}] {q_text[:60]} -> {stats['pct_yes']}% yes (n={stats['n']})")
+                summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> {stats['pct_yes']}% yes (n={stats['n']})")
             elif stats["type"] == "wtp":
-                summary_lines.append(f"  [{qid}] {q_text[:60]} -> mean WTP=NT${stats['mean']} (n={stats['n']})")
+                summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> mean WTP=NT${stats['mean']} (n={stats['n']})")
+            elif stats["type"] == "multi_select":
+                top = sorted(stats["rates"].items(), key=lambda x: -x[1])[:3]
+                top_str = ", ".join(f"{o}:{r}%" for o, r in top)
+                summary_lines.append(f"  [{qid}] {q_text[:60]} -> top drivers: {top_str} (n={stats['n']})")
         for t in sr.open_themes[:2]:
-            summary_lines.append(f"  [open] \"{t[:120]}\"")
+            safe_t = t[:120].replace('"', "'").replace('\\', '')
+            summary_lines.append(f"  [open] '{safe_t}'")
 
     raw = _chat(
         model=AGENT_MODEL,
         system=AGENT2_SYSTEM,
         user="\n".join(summary_lines),
-        max_tokens=1024,
+        max_tokens=4096,
         temperature=0.5,
     )
     data = _strip_json(raw)
