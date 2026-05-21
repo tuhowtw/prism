@@ -20,22 +20,28 @@ This sits at the intersection of:
 - **Prompt engineering for policy** — crafting LLM personas to proxy real-world agents
 - **Multi-agent simulation** — running ensembles of LLM "respondents" to surface distributional perception gaps
 
-**Policy domain:** Taiwan fertility policy (NT$200k subsidy demo)
+**Policy domain:** Taiwan fertility policy (NT$200k subsidy demo) + **piracy SDB study** (active research run)
 
 ## What We're Building Together
 
 - [x] Project proposal — `proposal.md` / `proposal.pdf`
 - [x] Presentation slides — `prism_slides.pptx`
-- [ ] Working demo (CLI first, then Streamlit UI)
+- [x] Working demo — CLI smoke test on piracy SDB study (N=20, full pipeline verified)
+- [x] Extended engine — multi-select, anon/named condition framing, SDB gap aggregation
+- [x] SVG report — offline HTML with bar charts, heatmap, histograms, TOC sidebar
 - [ ] Mid-term progress slides
+- [ ] Streamlit UI update to match extended engine
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `prism_engine.py` | Core pipeline — Agent 1 (2-phase), simulation, Agent 2 |
-| `prism_app.py` | Streamlit UI |
-| `prism_cli_test.py` | CLI end-to-end test |
+| `prism_engine.py` | Core pipeline — Agent 1 (2-phase), simulation, Agent 2; extended for SDB |
+| `prism_smoke_piracy.py` | End-to-end smoke test on piracy SDB research question |
+| `prism_report.py` | Generates SQLite DB + SVG-visualized HTML report from any run |
+| `runs/` | Timestamped run outputs: `.jsonl` (raw), `_report.json` (Agent 2), `.html`, `.db` |
+| `prism_app.py` | Streamlit UI (not yet updated for extended engine) |
+| `prism_cli_test.py` | Original CLI test — fertility policy input |
 | `prism_demo.html` | Static HTML prototype (visual reference) |
 | `.env` | API keys + model config (gitignored) |
 
@@ -43,18 +49,23 @@ This sits at the intersection of:
 
 **Stack:** Python + LiteLLM + Streamlit
 **Model config (via `.env`):**
-- `PRISM_AGENT_MODEL` — Agent 1 & 2 (default: `gemini/gemini-2.0-flash`)
-- `PRISM_SIM_MODEL` — bulk simulation (default: `gemini/gemini-2.0-flash`)
-- No Anthropic API key needed — Gemini-only setup
+- `PRISM_AGENT_MODEL` — Agent 1 & 2 (current: `gemini/gemini-2.5-flash`)
+- `PRISM_SIM_MODEL` — bulk simulation (current: `gemini/gemini-2.5-flash`)
+- Gemini API key with **billing enabled** (NT$150 cap set); free tier too rate-limited for full runs
 
 **Pipeline:**
 1. Agent 1 Phase A — asks 3 clarifying questions (`run_agent1_clarify`)
-2. Agent 1 Phase B — generates persona + survey JSON (`run_agent1_propose`)
-3. Simulation — async parallel LiteLLM calls, N respondents per segment×question
-4. Aggregation — per-segment stats (mean, SD, % yes, mean WTP)
-5. Agent 2 — strategic recommendations JSON
+2. Agent 1 Phase B — generates persona + survey JSON (`run_agent1_propose`); 12–15 Qs including anon/named SDB pair + multi-select
+3. Simulation — async parallel LiteLLM calls, N respondents per segment×question; condition framing injected per question
+4. Aggregation — per-segment stats (mean, SD, % yes, mean WTP, multi-select rates, SDB gap = anon−named mean)
+5. Agent 2 — strategic recommendations JSON (saved to `_report.json` per run)
 
-**Survey format:** Likert-5 primary (quantifiable, stat-testable), one open-ended at end.
+**Extended `SurveyQuestion` fields:**
+- `condition`: `"neutral"` | `"anonymous"` | `"named"` — prepends framing text to simulation prompt
+- `options`: list of strings for `multi_select` type
+- SDB pair detected by matching `_anon` / `_named` id suffixes
+
+**Survey format:** Likert-5 primary, one multi_select, one anon/named SDB pair, one WTP, one open-ended.
 
 ## Collaboration Notes
 
@@ -66,7 +77,7 @@ This sits at the intersection of:
 ## Data & API Setup
 
 - **Gemini API Key:** stored in `.env` as `GEMINI_API_KEY` (do not commit)
-- **Key requirement:** must be from a Google AI Studio project WITHOUT billing enabled (free tier)
+- **Billing:** enabled on Google AI Studio project — free tier (20 RPD) too slow for full runs; NT$150 cap set
 - **FRED API Key:** Stored in `fred_prac/.claude/settings.json` as `FRED_API_KEY` env var
 
 ## Key Design Decisions

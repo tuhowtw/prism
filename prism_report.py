@@ -42,6 +42,8 @@ with open(JSONL, encoding="utf-8") as f:
 # ---------------------------------------------------------------------------
 conn = sqlite3.connect(DB)
 conn.execute("DROP TABLE IF EXISTS responses")
+conn.execute("DROP TABLE IF EXISTS segments")
+conn.execute("DROP TABLE IF EXISTS questions")
 conn.execute("""
     CREATE TABLE responses (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,10 +53,41 @@ conn.execute("""
         parsed_value TEXT
     )
 """)
+conn.execute("""
+    CREATE TABLE segments (
+        name        TEXT PRIMARY KEY,
+        weight      REAL,
+        description TEXT,
+        rationale   TEXT
+    )
+""")
+conn.execute("""
+    CREATE TABLE questions (
+        id          TEXT PRIMARY KEY,
+        text        TEXT,
+        type        TEXT,
+        condition   TEXT,
+        scale_label TEXT,
+        options     TEXT
+    )
+""")
 conn.executemany(
     "INSERT INTO responses (segment, question_id, raw_response, parsed_value) VALUES (?,?,?,?)",
     [(r["segment"], r["question_id"], r["raw_response"], r["parsed_value"]) for r in rows]
 )
+if REPORT and "segments" in REPORT:
+    conn.executemany(
+        "INSERT OR IGNORE INTO segments (name, weight, description, rationale) VALUES (?,?,?,?)",
+        [(s["name"], s.get("weight",0), s.get("description",""), s.get("rationale",""))
+         for s in REPORT["segments"]]
+    )
+if REPORT and "questions" in REPORT:
+    conn.executemany(
+        "INSERT OR IGNORE INTO questions (id, text, type, condition, scale_label, options) VALUES (?,?,?,?,?,?)",
+        [(q["id"], q.get("text",""), q.get("type",""), q.get("condition","neutral"),
+          q.get("scale_label",""), json.dumps(q.get("options",[])))
+         for q in REPORT["questions"]]
+    )
 conn.execute("CREATE INDEX IF NOT EXISTS idx_seg_q ON responses(segment, question_id)")
 conn.commit()
 conn.close()
@@ -480,6 +513,84 @@ q_options   = "".join(f'<option value="{esc(q)}">{esc(q)}</option>' for q in que
 # ---------------------------------------------------------------------------
 # Agent 2 block
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Survey Design section (from report JSON)
+# ---------------------------------------------------------------------------
+TYPE_COLORS = {
+    "likert5":     ("#fef9c3", "#a16207"),
+    "binary":      ("#dcfce7", "#166534"),
+    "wtp":         ("#fce7f3", "#9d174d"),
+    "open":        ("#e0e7ff", "#3730a3"),
+    "multi_select":("#dbeafe", "#1e40af"),
+}
+
+survey_design_html = ""
+segments_html = ""
+
+if REPORT and "questions" in REPORT:
+    q_cards = []
+    for q in REPORT["questions"]:
+        qtype = q.get("type", "likert5")
+        bg, fg = TYPE_COLORS.get(qtype, ("#f0f2f5", "#333"))
+        cond = q.get("condition", "neutral")
+        cond_pill = ""
+        if cond == "anonymous":
+            cond_pill = ' <span style="background:#fde68a;color:#92400e;padding:1px 7px;border-radius:10px;font-size:9px;font-weight:bold">ANONYMOUS</span>'
+        elif cond == "named":
+            cond_pill = ' <span style="background:#bfdbfe;color:#1e40af;padding:1px 7px;border-radius:10px;font-size:9px;font-weight:bold">NAMED</span>'
+        badge = f'<span style="background:{bg};color:{fg};padding:2px 8px;border-radius:10px;font-size:9px;font-weight:bold">{esc(qtype.upper())}</span>'
+        scale = f'<div style="color:#888;font-size:10px;margin-top:4px">{esc(q.get("scale_label",""))}</div>' if q.get("scale_label") else ""
+        opts = q.get("options", [])
+        opts_html = ""
+        if opts:
+            letters = [chr(ord("A") + i) for i in range(len(opts))]
+            opts_html = '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">' + \
+                "".join(f'<span style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:9px">'
+                        f'<b>{l}</b> {esc(o)}</span>' for l, o in zip(letters, opts)) + "</div>"
+        q_cards.append(
+            f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:10px 14px;margin-bottom:8px">'
+            f'<div style="margin-bottom:6px">{badge}{cond_pill} &nbsp;<code style="font-size:10px;color:#94a3b8">{esc(q["id"])}</code></div>'
+            f'<div style="font-size:.85rem;color:#1e293b;font-weight:500">{esc(q["text"])}</div>'
+            f'{scale}{opts_html}'
+            f'</div>'
+        )
+    survey_design_html = "\n".join(q_cards)
+
+if REPORT and "segments" in REPORT:
+    seg_cards = []
+    for i, s in enumerate(REPORT["segments"]):
+        color = SEG_COLORS[i % len(SEG_COLORS)]
+        w = s.get("weight", 0)
+        bar_w = int(w * 200)
+        desc = s.get("description", "")
+        rationale = s.get("rationale", "")
+        seg_cards.append(
+            f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:12px 14px;margin-bottom:8px">'
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+            f'<span style="width:12px;height:12px;background:{color};border-radius:50%;display:inline-block"></span>'
+            f'<b style="font-size:.9rem">{esc(s["name"])}</b>'
+            f'<span style="font-size:.8rem;color:#64748b">weight: {w:.0%}</span>'
+            f'</div>'
+            f'<div style="background:#e2e8f0;border-radius:4px;height:6px;margin-bottom:8px">'
+            f'<div style="background:{color};width:{bar_w}px;height:6px;border-radius:4px;opacity:.8"></div></div>'
+            f'<div style="font-size:.78rem;color:#475569;margin-bottom:4px"><b>Persona:</b> {esc(desc)}</div>'
+            f'<div style="font-size:.75rem;color:#94a3b8"><b>Rationale:</b> {esc(rationale)}</div>'
+            f'</div>'
+        )
+    segments_html = "\n".join(seg_cards)
+
+# ---------------------------------------------------------------------------
+# Dynamic title
+# ---------------------------------------------------------------------------
+_title_text = "Prism Report"
+if REPORT and "input_text" in REPORT:
+    _title_text = REPORT["input_text"][:60]
+elif REPORT and "segments" in REPORT and REPORT["segments"]:
+    _title_text = f"Study — {REPORT['segments'][0].get('name','')}"
+
+# ---------------------------------------------------------------------------
+# Agent 2 block
+# ---------------------------------------------------------------------------
 if REPORT:
     a2 = REPORT["agent2"]
     score   = esc(str(a2["overall_summary"].get("weighted_reception_score", "—")))
@@ -576,11 +687,13 @@ select, input {{ padding:4px 8px; border:1px solid #bbb; border-radius:4px; font
 </style>
 </head>
 <body>
-<div id="topbar">Prism &mdash; Piracy SDB Report &nbsp;|&nbsp; {esc(JSONL.name)} &nbsp;|&nbsp; {len(rows)} responses</div>
+<div id="topbar">Prism &mdash; {esc(_title_text)} &nbsp;|&nbsp; {esc(JSONL.name)} &nbsp;|&nbsp; {len(rows)} responses</div>
 <div id="layout">
 <nav id="toc">
   <div class="toc-label">Sections</div>
   {toc_agent2}
+  <a href="#s-segments">Segments</a>
+  <a href="#s-survey">Survey Design</a>
   <a href="#s-sdb">SDB Gaps</a>
   <a href="#s-viz">Visualizations</a>
   <a href="#s-raw">Raw Responses</a>
@@ -592,6 +705,10 @@ select, input {{ padding:4px 8px; border:1px solid #bbb; border-radius:4px; font
 <div id="main">
 
 {agent2_block}
+
+{'<section id="s-segments"><h2>Audience Segments</h2><div class="section">' + segments_html + '</div></section>' if segments_html else ''}
+
+{'<section id="s-survey"><h2>Survey Design — Agent 1 Output</h2><div class="section">' + survey_design_html + '</div></section>' if survey_design_html else ''}
 
 <section id="s-sdb">
 <h2>SDB Gaps &mdash; Anonymous vs Named Disclosure</h2>

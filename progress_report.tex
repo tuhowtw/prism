@@ -1,0 +1,442 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage{luatexja}
+\usepackage{luatexja-fontspec}
+\usepackage{fontspec}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{mdframed}
+\usepackage{multirow}
+\usepackage{tabularx}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=3cm, right=3cm}
+\setmainfont{Times New Roman}
+\setmainjfont[BoldFont={Microsoft YaHei}]{MingLiU_HKSCS}
+
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+
+\newcommand{\done}{\textcolor{green!50!black}{$\checkmark$}}
+\newcommand{\inprog}{\textcolor{orange!70!black}{進行中}}
+\newcommand{\todo}{\textcolor{gray}{待完成}}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries MangaSim：漫畫盜版隱性偏好的多Agent AI模擬}\\[0.4em]
+  {\large 作業四進度報告}\\[0.6em]
+  涂皓 (tuhow)\quad 花曉桐\quad 徐瑋倢\quad 黃少桐\\[0.3em]
+  2026年5月
+\end{center}
+
+\vspace{0.5em}
+\noindent\rule{\linewidth}{0.5pt}
+
+% ─── 1. Background ────────────────────────────────────────────────────────────
+\section{1. 研究背景與問題}
+
+\subsection{1.1 為什麼選漫畫？}
+
+本研究以\textbf{漫畫盜版}作為研究核心，理由如下：
+
+\begin{itemize}
+  \item \textbf{盜版規模最大}：依據MUSO（2024）統計，漫畫佔全球出版類盜版瀏覽量的
+        70.15\%，2024年全球漫畫盜版瀏覽量達\textbf{466億次}，是唯一持續成長的盜版類別。\footnote{MUSO, ``2024 Manga Piracy Trends and Insights,'' \url{https://www.muso.com/muso-2024-manga-piracy-trends-and-insights-report}}
+
+  \item \textbf{台灣脈絡強}：2024年文化消費調查顯示，台灣漫畫讀者中\textbf{66.7\%使用數位閱讀}；
+        日本漫畫在台灣授權常有空窗期與繁中版時差，形成明顯的「合法無法取得」誘因。
+
+  \item \textbf{社會期許偏誤（SDB）效果明顯}：漫畫盜版行為有特定平台可指稱
+        （如Bato.to、MangaDex），受訪者在具名情境下較容易自我審查，有助量化SDB差距。
+\end{itemize}
+
+\subsection{1.2 研究問題}
+
+\begin{enumerate}
+  \item 不同社會經濟背景的台灣漫畫讀者，其盜版使用頻率有何差異？
+  \item 匿名與具名情境下，漫畫盜版行為的自我揭露有多大落差？
+  \item 價格、可得性、便利性、時差等因素，對各群體的影響力如何排序？
+  \item 若推出完整正版繁中漫畫平台，各群體的付費意願（WTP）為何？
+\end{enumerate}
+
+\subsection{1.3 台灣讀者常用盜版平台（2023–2025）}
+
+下表為Gemini深度調查報告（綜合Similarweb、Semrush流量數據）整理的八大台灣核心盜版平台：
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{p{2.3cm}p{2.2cm}p{1.6cm}p{1.8cm}p{4.3cm}}
+\toprule
+\textbf{站名} & \textbf{主網址} & \textbf{月流量} & \textbf{台灣佔比} & \textbf{特色與現況} \\
+\midrule
+Manhuagui\\（漫畫櫃） & manhuagui.com\\tw.manhuagui.com & 6,489萬 & 77.06\% & 台灣第一大盜版漫畫站；設有繁中專屬子網域；平均停留21分鐘、每次13.8頁；穩定運作 \\
+\midrule
+Happymh\\（嗨皮漫畫） & happymh.com & 5,244萬 & 67.31\% & 行動端最強；台灣社群網站分類第8名；原生支援繁簡自動切換；平均停留15分鐘 \\
+\midrule
+MangaDex\\（繁中版） & mangadex.org & 3.12億（全球） & 繁中主力 & 社群驅動、無廣告、API開放；台灣本土漢化組聚集地；提供高品質繁中社群譯 \\
+\midrule
+Baozimh\\（包子漫畫） & baozimh.com & 278萬 & 53.58\% & 專攻韓漫條漫；行動端87\%；網域頻繁更換 \\
+\midrule
+Manhuaren\\（漫畫人） & manhuaren.com & 283萬 & 60.29\% & 繁中支援含港台專區；高度依賴非官方APK散布 \\
+\midrule
+DM5\\（動漫屋） & dm5.com & 約200萬 & 39.34\% & 老牌站；繁簡切換；商業廣告含加密貨幣聯盟 \\
+\midrule
+Copymanga\\（拷貝漫畫） & mangacopy.com & 歷史極高 & 不明 & 主網域多次遭封；靠社群（PTT、Dcard）傳播備用連結；高度不穩定 \\
+\midrule
+18comic\\（禁漫天堂） & 18comic.org & 28.3萬 & 54.28\% & 原生繁中；成人內容為主；台灣ISP頻繁封鎖 \\
+\bottomrule
+\end{tabular}
+\caption{台灣讀者八大核心漫畫盜版平台（2023–2025）。來源：Gemini深度調查報告，綜合Similarweb、Semrush}
+\end{table}
+
+\textbf{重要背景：2024年iWIN事件}——台灣iWIN機構以「二次元虛擬兒少」為由，向PTT、Dcard等合法平台發送大規模下架通知，引發ACG社群強烈反彈。此事件意外推動大批台灣讀者轉向境外盜版平台，使Manhuagui等站流量進一步集中。
+
+\medskip
+\noindent\textbf{台灣讀者常用合法平台}：ReadMoo（讀墨）、BookWalker台灣、Comico、LINE Webtoon、MANGA Plus（集英社免費）
+
+% ─── 2. Survey Method ─────────────────────────────────────────────────────────
+\section{2. 問卷設計方法}
+
+\subsection{2.1 回應蒐集方法：SSR vs DLR}
+
+本研究採用\textbf{語義相似度評分（Semantic Similarity Rating, SSR）}蒐集模擬回應，
+以取代傳統直接Likert評分法（Direct Likert Response, DLR）。
+
+\textbf{DLR的問題}：直接要求LLM輸出1–5的整數，會導致嚴重的中央集中偏誤，
+回應集中在2–4，無法區分細微態度差異。
+依據Maier等人（2025）的驗證，DLR與真實人類分布的KS相似度僅0.26。\footnote{Benjamin F. Maier et al., ``LLMs Reproduce Human Purchase Intent via Semantic Similarity Elicitation of Likert Ratings,'' arXiv:2510.08338 (2025). 以9,300份人類問卷、57項消費品調查驗證；SSR達人類重測信度的90\%，KS相似度大於0.85。}
+
+\medskip
+\textbf{SSR流程}：
+\begin{enumerate}[leftmargin=2em]
+  \item 向LLM提問，\textbf{要求自由文字回應}（不指定輸出格式）
+  \item 對LLM回應進行\textbf{文字嵌入}（OpenAI \texttt{text-embedding-3-small}）
+  \item 同樣對\textbf{5個描述性錨點陳述}進行嵌入
+  \item 計算回應與各錨點的\textbf{餘弦相似度}，轉換為概率分布（pmf）
+  \item 取期望值作為Likert分數（可得非整數，分布更自然）
+\end{enumerate}
+
+SSR的優點：LLM以自然語言回答，不受數字格式限制；錨點設計確保量表一致性。
+
+\subsection{2.2 社會期許偏誤（SDB）的處理}
+
+\textbf{SDB的問題}：受訪者在具名情境下，對帶有道德污名的行為（如使用盜版）會傾向低報。
+
+\textbf{本研究的解法}：在問卷中加入\textbf{匿名/具名情境配對題}，
+對同一個模擬受訪者（persona）分別在兩種情境下提問，
+直接計算\textbf{SDB差距}（匿名均分 $-$ 具名均分）。
+差距為正值代表匿名時更願意承認使用盜版。
+
+\begin{center}
+\textbf{SDB差距} $=$ 匿名情境回應均值 $-$ 具名情境回應均值
+\end{center}
+
+% ─── 3. Survey Questions ──────────────────────────────────────────────────────
+\section{3. 問卷題目設計}
+
+\subsection{3.1 題目總覽}
+
+問卷共14題，包含：4題配對SDB核心題（2對匿名/具名）、1題多選驅動因素、
+7題態度量表、1題付費意願、1題開放式。
+
+\begin{longtable}{p{2cm}p{3cm}p{8.5cm}p{1.5cm}}
+\toprule
+\textbf{題號} & \textbf{主題} & \textbf{題目文字} & \textbf{方法} \\
+\midrule
+\endhead
+Q1a-匿 & 線上閱讀頻率（匿名）
+  & 【匿名情境】過去3個月，請問你在漫畫櫃（Manhuagui）、嗨皮漫畫（Happymh）、MangaDex、拷貝漫畫等非官方網站閱讀漫畫的頻率？
+  & SSR / 匿名 \\[4pt]
+Q1a-名 & 線上閱讀頻率（具名）
+  & 【具名情境】過去3個月，請問你在漫畫櫃（Manhuagui）、嗨皮漫畫（Happymh）、MangaDex、拷貝漫畫等非官方網站閱讀漫畫的頻率？
+  & SSR / 具名 \\[4pt]
+Q1b-匿 & 下載頻率（匿名）
+  & 【匿名情境】過去3個月，請問你從非官方管道下載漫畫圖檔（如PDF、CBZ）儲存在手機或電腦的頻率？
+  & SSR / 匿名 \\[4pt]
+Q1b-名 & 下載頻率（具名）
+  & 【具名情境】過去3個月，請問你從非官方管道下載漫畫圖檔儲存在手機或電腦的頻率？
+  & SSR / 具名 \\[4pt]
+Q2 & 合法平台使用率
+  & 過去3個月，請問你使用ReadMoo（讀墨）、BookWalker、Comico、LINE Webtoon、MANGA Plus等官方平台閱讀漫畫的頻率？
+  & SSR \\[4pt]
+Q3 & 使用非官方站的原因
+  & 你選擇漫畫櫃、嗨皮漫畫等非官方網站的原因有哪些？（可複選）
+  & 多選 \\[4pt]
+Q4 & 道德評價
+  & 整體來說，你認為使用漫畫櫃、嗨皮漫畫等非官方網站閱讀漫畫有多不道德？
+  & SSR \\[4pt]
+Q5 & 版權制度公平性
+  & 你認為台灣目前的漫畫授權與版權制度，對一般讀者來說是否公平？
+  & SSR \\[4pt]
+Q6 & 「沒辦法才用」的接受度
+  & 當你想看的漫畫沒有合法繁中版，或者合法版本要貴很多時，你覺得使用非官方網站可以接受嗎？
+  & SSR \\[4pt]
+Q7 & 罪惡感
+  & 使用漫畫櫃或嗨皮漫畫等非官方網站看漫畫時，你心裡有多少罪惡感？
+  & SSR \\[4pt]
+Q8 & 合法平台CP值
+  & 以ReadMoo或BookWalker台灣版的定價，你覺得是否值得？
+  & SSR \\[4pt]
+Q9 & 監管態度
+  & 你認為政府對非官方漫畫網站的管制（例如DNS封鎖、要求下架等），執行力度是否適當？
+  & SSR \\[4pt]
+WTP & 付費意願
+  & 假設有一個收錄完整日漫繁中版的官方訂閱平台，你最多願意每月付多少台幣？不願付請填0。
+  & WTP \\[4pt]
+Q-開 & 開放回應
+  & 請用一到兩句話說說你對台灣漫畫非官方網站問題的看法，或你繼續使用或不使用的原因。
+  & 開放式 \\
+\bottomrule
+\caption{MangaSim問卷題目清單（共14題）}
+\end{longtable}
+
+\noindent
+\textbf{SDB差距A（線上閱讀）} $=$ Q1a-匿均值 $-$ Q1a-名均值\\
+\textbf{SDB差距B（下載行為）} $=$ Q1b-匿均值 $-$ Q1b-名均值
+
+\subsection{3.2 頻率題SSR錨點設計}
+
+Q1a與Q1b共用以下5個行為描述錨點，\textbf{不使用數字或模糊頻率詞}：
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{cp{10.5cm}p{2cm}}
+\toprule
+\textbf{分數} & \textbf{錨點陳述（行為描述）} & \textbf{大約頻率} \\
+\midrule
+1 & 「過去3個月我完全沒有用過這類網站或下載過掃描檔。」 & 0次 \\
+2 & 「偶爾用過，大概只有1到3次，不算是習慣。」 & 不到每月一次 \\
+3 & 「某些系列我每週會去看一兩次更新。」 & 每週1至2次 \\
+4 & 「幾乎每天都會開這類網站追更新。」 & 接近每天 \\
+5 & 「這是我過去3個月看漫畫的主要方式，大部分內容都從這裡讀。」 & 主要管道 \\
+\bottomrule
+\end{tabular}
+\caption{頻率題SSR錨點（Q1a / Q1b共用）}
+\end{table}
+
+\subsection{3.3 Q3多選題選項設計}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{lp{11cm}}
+\toprule
+\textbf{選項代碼} & \textbf{選項內容} \\
+\midrule
+D1 & 官方平台定價太貴（ReadMoo單冊售價、BookWalker訂閱費偏高） \\
+D2 & 想看的漫畫在台灣沒有合法繁體中文版（日本原版未授權給台灣） \\
+D3 & 官方繁中版更新太慢——非官方翻譯往往在日本原版發布後數小時內就上線，比官方早數週甚至數月 \\
+D4 & 使用方便：漫畫櫃、嗨皮漫畫等網站畫質好、不強制廣告、可手機閱讀 \\
+D5 & 習慣問題：從國中或高中就開始用了，沒有特別想換 \\
+D6 & 覺得對實際創作者的傷害有限（尤其是大型日本出版社） \\
+D7 & 因為iWIN事件等審查爭議，不信任台灣的內容管理方式，主動選擇境外平台 \\
+\bottomrule
+\end{tabular}
+\caption{Q3驅動因素選項（D3「時差」與D7「iWIN監管不信任」為台灣特有驅動因素）}
+\end{table}
+
+% ─── 4. Persona Design ────────────────────────────────────────────────────────
+\section{4. 模擬受訪者設計（Persona）}
+
+\subsection{4.1 設計邏輯}
+
+四個模擬受訪者依據三個層次設計：
+\begin{itemize}
+  \item \textbf{人口結構}：對照2024文化調查漫畫讀者段（N=693），涵蓋台灣主要閱讀人口分布。
+  \item \textbf{研究文獻}：Phau \& Liang（2012）\footnote{Phau \& Liang, ``Downloading Digital Video Games: Predictors, Moderators, and Consequences,'' \textit{Marketing Intelligence and Planning} 30(7) (2012). 原研究對象為電玩；本研究類推至漫畫，同為日本IP密集的數位娛樂產品。} 指出低收入學生族群的數位盜版頻率最高，SDB差距也最顯著。
+  \item \textbf{SDB理論}：四個受訪者在「道德顧慮」與「習慣性使用非官方網站」兩軸上刻意差異化，預測SDB差距排序：學生 $>$ 一般上班族 $>$ 技術工作者 $>$ 注重正版的家長。
+\end{itemize}
+
+\subsection{4.2 受訪者設定}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{p{2.8cm}cccp{5.5cm}}
+\toprule
+\textbf{受訪者} & \textbf{年齡} & \textbf{月收入} & \textbf{居住地} & \textbf{漫畫閱讀習慣} \\
+\midrule
+Manga Otaku Student
+  & 20歲 & NT\$8,000 & 台北
+  & 每天手機用漫畫櫃追20部以上；對大出版商無罪惡感；具名壓力最大 \\
+Casual Pirate Worker
+  & 28歲 & NT\$35,000 & 高雄
+  & 通勤時用嗨皮漫畫看5至6部；高中養成習慣；偶買實體版；正式場合不承認 \\
+Legal-Leaning Parent
+  & 42歲 & NT\$80,000 & 台中
+  & 偶爾看；付費ReadMoo和Comico；關注iWIN事件；反感盜版站廣告環境 \\
+Tech Pro Subscriber
+  & 32歲 & NT\$120,000 & 台北
+  & 訂閱BookWalker日本版；偶用MangaDex高品質繁中社群譯；不用Manhuagui機轉版 \\
+\bottomrule
+\end{tabular}
+\caption{模擬受訪者設計（漫畫讀者）}
+\end{table}
+
+\subsection{4.3 完整模擬提示詞}
+
+\begin{mdframed}[backgroundcolor=gray!8, linecolor=gray!40, linewidth=0.5pt]
+\textbf{Persona 1 --- Manga Otaku Student}\\[0.3em]
+\small
+You are a 20-year-old university student in Taipei living on NT\$8,000/month.
+You follow over 20 ongoing manga series and read every day, almost entirely on your phone.
+Your main platforms are Manhuagui (漫畫櫃, tw.manhuagui.com) for Traditional Chinese scanlations,
+and MangaDex for series where local fan translation groups post higher-quality versions.
+You cannot afford subscriptions --- ReadMoo has a limited catalogue and charges per volume,
+which adds up fast. Official Traditional Chinese releases often lag weeks or months behind
+the Japanese originals, and you have no patience for that. You feel almost no moral guilt:
+you see the big Japanese publishers as distant corporations, not creators who suffer from
+your reading habits. However, you would not openly admit to using these sites in front of
+professors, employers, or on a named survey --- it just sounds bad.
+\end{mdframed}
+
+\begin{mdframed}[backgroundcolor=gray!8, linecolor=gray!40, linewidth=0.5pt]
+\textbf{Persona 2 --- Casual Pirate Worker}\\[0.3em]
+\small
+You are a 28-year-old office worker in Kaohsiung earning NT\$35,000/month.
+You casually follow five or six manga series. You read them on Happymh (嗨皮漫畫)
+on your phone during commutes --- a habit you picked up in high school that you never
+bothered to change. You buy physical collector's editions of your favorite series once
+in a while, which makes you feel like you are supporting the creators enough.
+You know using these sites is technically copyright infringement but it does not feel
+wrong to you. In a formal or professionally named context, you would deny or downplay
+your use of piracy sites, because it could reflect badly on you.
+\end{mdframed}
+
+\begin{mdframed}[backgroundcolor=gray!8, linecolor=gray!40, linewidth=0.5pt]
+\textbf{Persona 3 --- Legal-Leaning Parent}\\[0.3em]
+\small
+You are a 42-year-old parent of two in Taichung with a household income of NT\$80,000/month.
+You read manga occasionally --- mostly titles your teenage children recommend.
+You pay for ReadMoo and Comico because you want to set a good example for your children about
+respecting intellectual property. You find sites like Manhuagui cluttered, full of sketchy ads,
+and you do not trust them. The 2024 iWIN content moderation controversy made you more aware
+of the risks of unregulated platforms. You feel clearly uncomfortable about copyright
+infringement and would not use piracy sites even if a title is not available legally.
+\end{mdframed}
+
+\begin{mdframed}[backgroundcolor=gray!8, linecolor=gray!40, linewidth=0.5pt]
+\textbf{Persona 4 --- Tech Pro Subscriber}\\[0.3em]
+\small
+You are a 32-year-old software engineer in Taipei earning NT\$120,000/month.
+You subscribe to BookWalker Japan for simulpublication of series you care about.
+You also use MangaDex occasionally for fan translations of niche titles not yet officially
+licensed in Taiwan --- you appreciate MangaDex's no-ad, API-based design and the quality
+of its community translators over the machine-converted Traditional Chinese on Manhuagui.
+You rationalize MangaDex use as filling a gap the market created, not as theft.
+You would pay comfortably for a well-designed all-in-one Traditional Chinese manga platform
+if it existed. In professional settings, you would not mention using any unofficial sites.
+\end{mdframed}
+
+\subsection{4.4 與2024文化調查的對應}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{p{4.5cm}rp{5.5cm}}
+\toprule
+\textbf{調查指標（漫畫讀者段，N=693）} & \textbf{數值} & \textbf{對應受訪者} \\
+\midrule
+數位閱讀使用率 & 66.7\% & 全部（主要使用數位） \\
+實體閱讀使用率 & 58.4\% & Casual Worker（買實體珍藏版） \\
+閱讀頁漫（翻頁式）& 72.4\% & Otaku Student、Casual Worker \\
+閱讀條漫（長條式）& 37.8\% & Tech Pro（LINE Webtoon） \\
+圖書館紙本借閱漫畫 & 20.1\% & Legal Parent（合法途徑） \\
+閱讀台灣創作者漫畫 & 19.0\% & 主要集中在Legal Parent \\
+\bottomrule
+\end{tabular}
+\caption{2024文化調查漫畫讀者段與模擬受訪者設定的對應關係}
+\end{table}
+
+目前四個受訪者各佔25\%為暫定值；正式執行前將依調查中年齡$\times$收入分布調整權重。
+
+% ─── 5. Pilot Results ─────────────────────────────────────────────────────────
+\section{5. 初步測試結果（DLR方法基線）}
+
+\begin{tcolorbox}[colback=yellow!10, colframe=orange!50, boxrule=0.5pt]
+以下結果來自先前以\textbf{DLR方法}（直接Likert評分）進行的廣泛盜版問卷初步測試。
+受中央集中偏誤影響，\textbf{絕對數值僅供參考；排名方向性可信，將以SSR重新驗證。}
+\end{tcolorbox}
+
+\subsection{5.1 SDB差距排行}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{lrp{8cm}}
+\toprule
+\textbf{受訪者} & \textbf{SDB差距} & \textbf{說明} \\
+\midrule
+預算有限的學生族 & \textcolor{red!70!black}{\textbf{+3.20}} & 符合預期：使用頻率高、罪惡感低，但具名時社會壓力最強 \\
+一般上班族 & \textcolor{red!70!black}{\textbf{+3.05}} & 習慣性使用加上職場形象顧慮，具名時顯著低報 \\
+注重家庭的家長 & +1.65 & 本身使用頻率低，但具名時更強調道德立場 \\
+高收入技術工作者 & +1.50 & 偶爾使用、收入較高，具名情境調整幅度最小 \\
+\bottomrule
+\end{tabular}
+\caption{初步SDB差距排行（DLR基線，N=20）。低收入高使用族群的差距最大，符合理論預測。}
+\end{table}
+
+排名順序\textbf{符合理論預期}，驗證受訪者設計邏輯的有效性。
+正式漫畫問卷以SSR執行後，預期Manga Otaku Student與Casual Worker排名最前。
+
+\subsection{5.2 付費意願基線}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{lrp{6cm}}
+\toprule
+\textbf{受訪者} & \textbf{平均WTP（NT\$/月）} & \textbf{備註} \\
+\midrule
+預算有限的學生族 & NT\$352 & 約一個Netflix基本方案 \\
+一般上班族 & NT\$268 & 低於學生（更強烈的反彈心理） \\
+注重家庭的家長 & NT\$793 & 願意為家庭多付費 \\
+高收入技術工作者 & NT\$1,000+ & 符合高收入特徵 \\
+\bottomrule
+\end{tabular}
+\caption{付費意願基線（DLR，廣泛盜版問卷）。漫畫專題WTP預期更低（範疇縮小）。}
+\end{table}
+
+% ─── 6. Next Steps ────────────────────────────────────────────────────────────
+\section{6. 下一步計畫}
+
+\begin{enumerate}
+  \item \textbf{5/15前（第一階段檢核點）}
+    \begin{itemize}
+      \item 確認漫畫問卷最終版（已含SSR錨點，見第3節）
+      \item 完成SSR流程實作：向LLM收自由文字 $\rightarrow$ embedding $\rightarrow$ cosine similarity轉pmf
+      \item 小規模漫畫問卷SSR測試（每組受訪者N=5，驗證流程）
+    \end{itemize}
+  \item \textbf{5/15至5/31}
+    \begin{itemize}
+      \item 正式執行漫畫問卷SSR，每組N$\geq$30
+      \item 對比實驗：相同問卷跑DLR與SSR，比較SDB差距的分布差異
+      \item 依2024調查漫畫讀者段資料調整受訪者權重
+    \end{itemize}
+  \item \textbf{期末前}
+    \begin{itemize}
+      \item 統計檢定：ANOVA、單調性檢定、排名相關係數
+      \item 與2024調查比對：AI模擬的消費分布 vs 真實漫畫讀者分布
+      \item 期末報告與簡報
+    \end{itemize}
+\end{enumerate}
+
+\vspace{1em}
+\noindent\rule{\linewidth}{0.5pt}
+{\small
+\textbf{資料來源：}
+MUSO（2024年漫畫盜版報告）；
+Similarweb流量數據（引自Variety, 2024）；
+TorrentFreak盜版平台追蹤報導；
+2024年文化內容消費趨勢調查（N=2,000，助教提供）；
+Maier et al., arXiv:2510.08338 (2025)；
+Phau \& Liang, \textit{Marketing Intelligence and Planning} 30(7) (2012)。
+}
+
+\end{document}

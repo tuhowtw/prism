@@ -32,6 +32,10 @@ load_dotenv()
 AGENT_MODEL = os.getenv("PRISM_AGENT_MODEL", "claude-sonnet-4-6")
 SIM_MODEL   = os.getenv("PRISM_SIM_MODEL",   "gemini/gemini-2.0-flash")
 
+# If true, _chat/_achat will pass api_key=None to litellm (reads from env).
+# Set PRISM_ALLOW_ENV_KEY=true for local dev / existing scripts.
+ALLOW_ENV_KEY = os.getenv("PRISM_ALLOW_ENV_KEY", "false").lower() == "true"
+
 # Suppress litellm success logs
 litellm.success_callback = []
 litellm.set_verbose = False
@@ -56,6 +60,18 @@ class SurveyQuestion:
     scale_label: str = ""  # e.g. "1=Strongly Disagree, 5=Strongly Agree"
     options: list = field(default_factory=list)   # for multi_select
     condition: str = "neutral"                    # "neutral" | "anonymous" | "named"
+
+@dataclass
+class ClarifyQuestion:
+    id: str               # stable key — GUI uses for state
+    axis: str             # "geography"|"decision"|"segments"|"sensitivity"|"success_metric"|"constraints"
+    text: str             # question text shown to user
+    why: str              # one sentence: what this answer changes downstream (GUI tooltip)
+    answer_type: str      # "text" | "single_select" | "multi_select" | "number"
+    options: list         # suggested answers — GUI renders as radio/chip/checkbox
+    allow_freeform: bool  # if True, GUI adds "Other..." free-text box
+    skippable: bool       # if True, GUI shows "Let agent decide" button
+    priority: str         # "must" | "nice" — GUI hides "nice" behind expander
 
 @dataclass
 class SimulatedResponse:
@@ -84,22 +100,34 @@ class AnalysisOutput:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _chat(model: str, system: str, user: str, max_tokens: int = 2048, temperature: float = 0.7) -> str:
+def _chat(
+    model: str, system: str, user: str,
+    max_tokens: int = 2048, temperature: float = 0.7,
+    api_key: str | None = None,
+) -> str:
     """Synchronous single-turn chat via LiteLLM with retry on 429."""
     import time
+    if api_key is None and not ALLOW_ENV_KEY:
+        raise RuntimeError(
+            "No API key provided. Set PRISM_ALLOW_ENV_KEY=true for local dev "
+            "or pass api_key explicitly."
+        )
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
     delay = 20.0
+    call_kwargs: dict = dict(
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    if api_key is not None:
+        call_kwargs["api_key"] = api_key
     for attempt in range(8):
         try:
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            response = litellm.completion(**call_kwargs)
             return response.choices[0].message.content.strip()
         except litellm.exceptions.RateLimitError:
             if attempt == 7:
@@ -108,18 +136,30 @@ def _chat(model: str, system: str, user: str, max_tokens: int = 2048, temperatur
             delay = min(delay * 1.5, 120.0)
 
 
-async def _achat(model: str, system: str, user: str, max_tokens: int = 256, temperature: float = 1.0) -> str:
+async def _achat(
+    model: str, system: str, user: str,
+    max_tokens: int = 256, temperature: float = 1.0,
+    api_key: str | None = None,
+) -> str:
     """Async single-turn chat via LiteLLM."""
+    if api_key is None and not ALLOW_ENV_KEY:
+        raise RuntimeError(
+            "No API key provided. Set PRISM_ALLOW_ENV_KEY=true for local dev "
+            "or pass api_key explicitly."
+        )
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    response = await litellm.acompletion(
+    call_kwargs: dict = dict(
         model=model,
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    if api_key is not None:
+        call_kwargs["api_key"] = api_key
+    response = await litellm.acompletion(**call_kwargs)
     return response.choices[0].message.content.strip()
 
 
@@ -137,17 +177,94 @@ def _strip_json(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 
 AGENT1_CLARIFY_SYSTEM = """\
-You are a market research strategist. A user wants to simulate how different stakeholder
-groups perceive a policy or product. Before designing the study, you must ask exactly
-3 clarifying questions.
+You are a market-research consultant scoping a multi-agent perception study.
+Read the user's policy/product description and identify only what is genuinely missing
+before a survey can be designed. Do NOT generate personas or survey questions — that is Phase B.
 
-Focus your questions on:
-1. Target geography / market
-2. The decision the user is trying to inform (e.g. launch, policy change, pricing)
-3. Any known stakeholder groups that matter most to them
+Output ONLY valid JSON. No markdown fences, no prose. Exact schema:
+{
+  "questions": [
+    {
+      "id": "string — short snake_case, unique within this response",
+      "axis": "one of: geography | decision | segments | sensitivity | success_metric | constraints",
+      "text": "the question to show the user",
+      "why": "one sentence: what this answer changes downstream (shown as GUI tooltip)",
+      "answer_type": "one of: text | single_select | multi_select | number",
+      "options": ["suggested answer 1", "suggested answer 2", ...],
+      "allow_freeform": true or false,
+      "skippable": true or false,
+      "priority": "must or nice"
+    }
+  ]
+}
 
-Ask all 3 questions in a single, numbered list. Do not generate personas or survey
-questions yet — only ask for clarification.
+Axis definitions:
+  geography      — target market, country, region, currency context
+  decision       — what the user will DO with results (launch, adjust pricing, inform policy)
+  segments       — known stakeholder groups to include or exclude
+  sensitivity    — is the topic taboo / socially loaded enough to warrant anonymous vs named framing?
+  success_metric — what outcome counts as "good" (adoption %, WTP threshold, attitudinal shift)
+  constraints    — budget, timeline, regulatory levers that bound realism
+
+Rules:
+1. Only ask where the input is genuinely unclear. If the user already stated it, skip that axis.
+2. Maximum 5 questions total. Prefer 2–3. Quality over coverage.
+3. Every question MUST have 3–6 items in "options" — realistic suggested answers the user can click.
+   Even for answer_type "text", include options as quick-pick suggestions and set allow_freeform=true.
+4. answer_type guide:
+   - single_select  → exactly one answer expected (geography, decision, success_metric)
+   - multi_select   → several may apply (segments, constraints)
+   - text           → open-ended nuance; always pair with options + allow_freeform=true
+   - number         → numeric threshold (e.g. target sample N, WTP ceiling)
+5. priority "must" → answer is structurally required for survey design (e.g. geography determines
+   currency). Mark at most 3 as "must"; default to "nice".
+6. skippable=true → user can click "Let agent decide" and skip; engine will infer from context.
+   Set skippable=false only when the absence would make the survey non-functional.
+7. sensitivity axis is special: probe whether the topic warrants anon/named SDB framing unless
+   the input already makes it obvious (clearly taboo → auto-confirmed, skip asking; clearly benign
+   → still ask, because it changes survey design).
+8. The "why" field must name a concrete downstream effect, not just restate the question.
+
+One-shot example (coffee-brand pricing study — adapt schema, not content):
+Input: "We sell specialty coffee in Taipei. Thinking of raising price from NT$120 to NT$160."
+Output:
+{
+  "questions": [
+    {
+      "id": "target_segment",
+      "axis": "segments",
+      "text": "Which customer groups matter most for this pricing decision?",
+      "why": "Segments determine persona demographics and weight; missing this risks a generic result.",
+      "answer_type": "multi_select",
+      "options": ["Daily office commuters", "Weekend café dwellers", "Student budget buyers", "Specialty-coffee enthusiasts", "Delivery app users"],
+      "allow_freeform": true,
+      "skippable": true,
+      "priority": "must"
+    },
+    {
+      "id": "decision_goal",
+      "axis": "decision",
+      "text": "What will you do with the simulation results?",
+      "why": "Decides whether Agent 2 frames recommendations around revenue optimization or brand risk.",
+      "answer_type": "single_select",
+      "options": ["Decide whether to raise the price at all", "Choose how to communicate the increase", "Identify which segment to target first", "Benchmark against competitor pricing"],
+      "allow_freeform": true,
+      "skippable": false,
+      "priority": "must"
+    },
+    {
+      "id": "sensitivity_check",
+      "axis": "sensitivity",
+      "text": "Is price sensitivity something customers might under-report in a non-anonymous survey?",
+      "why": "Determines whether to include an anonymous vs named SDB question pair.",
+      "answer_type": "single_select",
+      "options": ["Yes — social pressure to seem non-price-sensitive", "Unlikely — customers are candid about price", "Unsure"],
+      "allow_freeform": false,
+      "skippable": true,
+      "priority": "nice"
+    }
+  ]
+}
 """
 
 _CONDITION_PREFIX = {
@@ -165,15 +282,45 @@ _CONDITION_PREFIX = {
 }
 
 
-def run_agent1_clarify(input_text: str) -> str:
-    """Phase A — return 3 clarifying questions as a string."""
-    return _chat(
+def run_agent1_clarify(input_text: str, api_key: str | None = None) -> list[ClarifyQuestion]:
+    """Phase A — return adaptive clarifying questions as structured ClarifyQuestion list."""
+    raw = _chat(
         model=AGENT_MODEL,
         system=AGENT1_CLARIFY_SYSTEM,
         user=f"Policy/Product Description:\n\n{input_text}",
-        max_tokens=512,
-        temperature=0.5,
+        max_tokens=1024,
+        temperature=0.3,
+        api_key=api_key,
     )
+    data = _strip_json(raw)
+    return [
+        ClarifyQuestion(
+            id=q["id"],
+            axis=q["axis"],
+            text=q["text"],
+            why=q["why"],
+            answer_type=q["answer_type"],
+            options=q.get("options", []),
+            allow_freeform=q.get("allow_freeform", True),
+            skippable=q.get("skippable", True),
+            priority=q.get("priority", "nice"),
+        )
+        for q in data["questions"]
+    ]
+
+
+def format_clarifications(questions: list[ClarifyQuestion], answers: dict[str, str]) -> str:
+    """Flatten answered ClarifyQuestion list into a text block for Phase B.
+
+    answers maps question id → answer string. "__SKIP__" values are omitted.
+    """
+    lines = []
+    for q in questions:
+        ans = answers.get(q.id, "__SKIP__")
+        if ans == "__SKIP__":
+            continue
+        lines.append(f"[{q.axis}] {q.text}\nAnswer: {ans}")
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -264,13 +411,15 @@ Rules:
 """
 
 
-def run_agent1_propose(input_text: str, clarifications: str = "") -> tuple[list[Segment], list[SurveyQuestion]]:
+def run_agent1_propose(
+    input_text: str, clarifications: str = "", api_key: str | None = None
+) -> tuple[list[Segment], list[SurveyQuestion]]:
     """Phase B — generate segment + question proposal from description and optional clarifications."""
     user_content = f"Product/Policy Description:\n{input_text}"
     if clarifications:
         user_content += f"\n\nClarification Answers:\n{clarifications}"
 
-    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content, max_tokens=8192)
+    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content, max_tokens=8192, api_key=api_key)
     data = _strip_json(raw)
 
     segments = [
@@ -296,9 +445,9 @@ def run_agent1_propose(input_text: str, clarifications: str = "") -> tuple[list[
     return segments, questions
 
 
-def run_agent1(input_text: str) -> tuple[list[Segment], list[SurveyQuestion]]:
+def run_agent1(input_text: str, api_key: str | None = None) -> tuple[list[Segment], list[SurveyQuestion]]:
     """Single-shot Agent 1 (no clarification step — used in automated pipeline)."""
-    return run_agent1_propose(input_text)
+    return run_agent1_propose(input_text, api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +519,7 @@ async def _simulate_one(
     segment: Segment,
     question: SurveyQuestion,
     semaphore: asyncio.Semaphore,
+    api_key: str | None = None,
     max_retries: int = 10,
 ) -> SimulatedResponse:
     instruction = _build_question_instruction(question)
@@ -383,6 +533,7 @@ async def _simulate_one(
                     user=instruction,
                     max_tokens=256,
                     temperature=1.0,
+                    api_key=api_key,
                 )
             break
         except litellm.exceptions.RateLimitError:
@@ -404,10 +555,23 @@ async def run_simulation_async(
     questions: list[SurveyQuestion],
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
+    api_key: str | None = None,
+    progress_callback=None,
 ) -> list[SimulatedResponse]:
     semaphore = asyncio.Semaphore(max_concurrent)
+    total = len(segments) * len(questions) * responses_per_cell
+    completed = 0
+
+    async def _sim_with_progress(segment, question):
+        nonlocal completed
+        result = await _simulate_one(segment, question, semaphore, api_key=api_key)
+        completed += 1
+        if progress_callback is not None:
+            progress_callback(completed, total)
+        return result
+
     tasks = [
-        _simulate_one(segment, question, semaphore)
+        _sim_with_progress(segment, question)
         for segment in segments
         for question in questions
         for _ in range(responses_per_cell)
@@ -421,9 +585,14 @@ def run_simulation(
     questions: list[SurveyQuestion],
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
+    api_key: str | None = None,
+    progress_callback=None,
 ) -> list[SimulatedResponse]:
     return asyncio.run(
-        run_simulation_async(segments, questions, responses_per_cell, max_concurrent)
+        run_simulation_async(
+            segments, questions, responses_per_cell, max_concurrent,
+            api_key=api_key, progress_callback=progress_callback,
+        )
     )
 
 
@@ -560,6 +729,7 @@ def run_agent2(
     segment_results: list[SegmentResult],
     questions: list[SurveyQuestion],
     input_text: str,
+    api_key: str | None = None,
 ) -> AnalysisOutput:
     summary_lines = [f"Product/Policy: {input_text}\n"]
     for sr in segment_results:
@@ -592,6 +762,7 @@ def run_agent2(
         user="\n".join(summary_lines),
         max_tokens=4096,
         temperature=0.5,
+        api_key=api_key,
     )
     data = _strip_json(raw)
 
@@ -613,6 +784,7 @@ def run_pipeline(
     responses_per_cell: int = 10,
     progress_callback=None,
     clarifications: str = "",
+    api_key: str | None = None,
 ) -> AnalysisOutput:
     """
     End-to-end pipeline.
@@ -624,16 +796,16 @@ def run_pipeline(
             progress_callback(step, pct)
 
     cb("Agent 1: Analyzing audience and designing survey...", 0.05)
-    segments, questions = run_agent1_propose(input_text, clarifications)
+    segments, questions = run_agent1_propose(input_text, clarifications, api_key=api_key)
 
     cb("Simulation: Running synthetic respondents...", 0.25)
-    responses = run_simulation(segments, questions, responses_per_cell=responses_per_cell)
+    responses = run_simulation(segments, questions, responses_per_cell=responses_per_cell, api_key=api_key)
 
     cb("Aggregating results...", 0.80)
     segment_results = _aggregate_responses(responses, segments, questions)
 
     cb("Agent 2: Generating strategic recommendations...", 0.90)
-    output = run_agent2(segment_results, questions, input_text)
+    output = run_agent2(segment_results, questions, input_text, api_key=api_key)
 
     cb("Done.", 1.0)
     return output

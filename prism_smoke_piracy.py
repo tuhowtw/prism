@@ -139,8 +139,16 @@ _report = {
     "run_file": str(_run_file),
     "timestamp": _ts,
     "n_per_cell": RESPONSES_PER_CELL,
-    "segments": [{"name": s.name, "weight": s.weight} for s in segments],
-    "questions": [{"id": q.id, "text": q.text, "type": q.type, "condition": q.condition} for q in questions],
+    "input_text": INPUT,
+    "segments": [
+        {"name": s.name, "weight": s.weight, "description": s.description, "rationale": s.rationale}
+        for s in segments
+    ],
+    "questions": [
+        {"id": q.id, "text": q.text, "type": q.type, "condition": q.condition,
+         "scale_label": q.scale_label, "options": q.options}
+        for q in questions
+    ],
     "sdb_gaps": {
         pair_prefix: {seg_name: gap for seg_name, gap in seg_gaps}
         for pair_prefix, seg_gaps in all_gaps.items()

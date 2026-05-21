@@ -1,0 +1,403 @@
+\documentclass[12pt, a4paper]{article}
+
+% ── Fonts & Encoding ──────────────────────────────────────────────────────────
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\setCJKmainfont{DFKai-SB}
+\setmainfont{Times New Roman}
+
+% ── Layout ────────────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2.5cm, left=3cm, right=3cm]{geometry}
+\usepackage{array, booktabs, tabularx, multirow, makecell}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{mdframed}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{hyperref}
+
+% ── Colours ───────────────────────────────────────────────────────────────────
+\definecolor{prismblue}{RGB}{30, 90, 160}
+\definecolor{defbox}{RGB}{240, 246, 255}
+\definecolor{defborder}{RGB}{100, 150, 220}
+\definecolor{primebox}{RGB}{255, 248, 230}
+\definecolor{primeborder}{RGB}{200, 160, 60}
+\definecolor{lightgray}{RGB}{245,245,245}
+
+% ── Section style ─────────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{prismblue}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+% ── Likert helper ─────────────────────────────────────────────────────────────
+\newcommand{\likertfive}[2]{%
+  \begin{tabular}{@{}ccccc@{}}
+    \footnotesize 1 & \footnotesize 2 & \footnotesize 3 & \footnotesize 4 & \footnotesize 5 \\
+    $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$ \\[2pt]
+    \multicolumn{2}{l}{\footnotesize #1} & & \multicolumn{2}{r}{\footnotesize #2}
+  \end{tabular}%
+}
+
+% ── Choice helper ─────────────────────────────────────────────────────────────
+\newcommand{\choiceitem}[1]{\item[$\square$] #1}
+\newcommand{\radioitem}[1]{\item[$\bigcirc$] #1}
+
+% ── Question counter ──────────────────────────────────────────────────────────
+\newcounter{qnum}
+\newcommand{\q}[1]{\stepcounter{qnum}\noindent\textbf{Q\arabic{qnum}.}\enspace #1\par\smallskip}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+% ── Cover ─────────────────────────────────────────────────────────────────────
+\begin{center}
+  {\LARGE\bfseries\color{prismblue} 漫畫消費與盜版認知調查}\\[0.4em]
+  {\large Prism 政策感知研究計畫}\\[0.3em]
+  {\small 本問卷針對台灣大學生，預計填寫時間約 8--10 分鐘。\\
+   所有回答均用於學術研究，匿名處理，不作商業用途。}
+\end{center}
+
+\bigskip
+
+% ── Moral Priming Block ───────────────────────────────────────────────────────
+\begin{mdframed}[backgroundcolor=primebox, linecolor=primeborder,
+                 linewidth=1.2pt, innerleftmargin=12pt, innerrightmargin=12pt,
+                 innertopmargin=10pt, innerbottommargin=10pt]
+\begin{center}
+  \textbf{$\bigstar$ 回顧這一年的漫畫時光 $\bigstar$}
+\end{center}
+\smallskip
+這一年，你讀過幾部漫畫？在每個深夜追更新、每次被劇情震撼的瞬間，背後都有作者、編輯和整個製作團隊的心血在支撐著這個故事。
+
+每一個閱讀選擇，都在創作生態中留下了不同的痕跡。
+
+\medskip
+\textit{（以下問題請根據你的真實經驗作答，沒有對錯之分）}
+\end{mdframed}
+
+\bigskip
+
+% ═══════════════════════════════════════════════════════════════
+\section*{A 部分｜閱讀習慣}
+% ═══════════════════════════════════════════════════════════════
+
+\q{你平均多久閱讀一次漫畫（含紙本、電子、任何形式）？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{幾乎每天}
+  \radioitem{每週數次}
+  \radioitem{每週約一次}
+  \radioitem{每月數次}
+  \radioitem{很少或幾乎不讀}
+\end{itemize}
+
+\bigskip
+
+\q{你主要透過哪些管道閱讀漫畫？（可複選）}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \choiceitem{官方付費／訂閱平台（如 LINE Manga、Comico、ComiXology、BookWalker 等）}
+  \choiceitem{出版社官方網站或 APP}
+  \choiceitem{圖書館借閱或購買實體書}
+  \choiceitem{非官方免費閱讀網站（如各類漫畫閱讀網）}
+  \choiceitem{社群媒體（Instagram、Twitter/X、Threads、Facebook 等）}
+  \choiceitem{通訊軟體（LINE 群組、Discord 等）}
+  \choiceitem{朋友直接傳送給我}
+  \choiceitem{其他：\underline{\hspace{6cm}}}
+\end{itemize}
+
+\bigskip
+
+\q{過去一年，你是否曾透過「非官方」管道閱讀漫畫？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{是}
+  \radioitem{否}
+  \radioitem{不確定（不清楚所使用的管道是否為官方授權）}
+\end{itemize}
+
+\bigskip
+
+\q{你曾經做過以下哪些行為？（可複選）}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \choiceitem{在非官方網站上瀏覽漫畫}
+  \choiceitem{將漫畫頁面下載或儲存至個人裝置}
+  \choiceitem{在社群媒體上分享漫畫截圖（1至數格）}
+  \choiceitem{將多頁或整章漫畫傳送給朋友}
+  \choiceitem{在論壇或群組中上傳漫畫頁面}
+  \choiceitem{以上皆無}
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════════
+\section*{B 部分｜認知與意識}
+% ═══════════════════════════════════════════════════════════════
+
+\q{當你在線上閱讀漫畫時，你多常留意該來源是否為官方授權？}
+
+\medskip
+\likertfive{從不留意}{總是留意}
+
+\bigskip
+
+\q{你是否能分辨官方平台與非官方來源？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{能清楚分辨}
+  \radioitem{大多能分辨}
+  \radioitem{有時難以分辨}
+  \radioitem{通常無法分辨}
+\end{itemize}
+
+\bigskip
+
+\q{若你曾使用非官方來源閱讀漫畫，主要原因為何？（可複選）}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \choiceitem{免費，不需付費}
+  \choiceitem{更新速度比官方更快}
+  \choiceitem{官方平台沒有我想看的作品（如未代理、已下架）}
+  \choiceitem{習慣，沒有特別思考來源}
+  \choiceitem{朋友推薦或傳送給我}
+  \choiceitem{不知道有對應的官方管道}
+  \choiceitem{我未曾使用非官方來源}
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════════
+\section*{C 部分｜定義確認}
+% ═══════════════════════════════════════════════════════════════
+
+\begin{mdframed}[backgroundcolor=defbox, linecolor=defborder,
+                 linewidth=1.2pt, innerleftmargin=14pt, innerrightmargin=14pt,
+                 innertopmargin=10pt, innerbottommargin=10pt]
+\textbf{本問卷對「盜版漫畫」的定義如下：}
+
+\medskip
+\textit{任何未經作者或出版社授權而上傳、流通的漫畫版本，無論其形式為網站、論壇、社群媒體或通訊軟體，均屬盜版。}
+
+\medskip
+\footnotesize 補充說明：根據現行著作權法，「散布」及「重製」未授權內容屬於侵權行為。單純「瀏覽」在法律上的定性較為複雜，各方見解不一。
+\end{mdframed}
+
+\bigskip
+
+\q{上述定義是否與你原本對「盜版」的理解一致？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{完全一致}
+  \radioitem{大致一致，但我的定義較寬鬆}
+  \radioitem{大致一致，但我的定義較嚴格}
+  \radioitem{差異很大}
+\end{itemize}
+
+\bigskip
+
+\q{根據上述定義，你認為你過去的閱讀行為涉及盜版的程度為何？}
+
+\medskip
+\likertfive{完全沒有涉及}{幾乎都涉及}
+
+% ═══════════════════════════════════════════════════════════════
+\section*{D 部分｜態度與感受}
+% ═══════════════════════════════════════════════════════════════
+
+\textit{以下兩題請根據你讀完上述定義後的真實感受作答。}
+
+\bigskip
+
+\q{【個人感受】了解上述定義後，你對自己過去的閱讀習慣有什麼想法或感受？}
+
+\medskip
+\likertfive{完全沒有特別感受}{非常在意，想重新審視習慣}
+
+\bigskip
+
+\q{【社交感受】如果你的朋友或家人能看到你過去所有的漫畫閱讀紀錄，你會有什麼感受？}
+
+\medskip
+\likertfive{完全不在意}{非常在意或感到不自在}
+
+\bigskip
+
+\q{讀完上述定義後，你對「盜版」這件事的看法是否有所改變？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{是，我認為盜版比我原本想的更嚴重}
+  \radioitem{是，我認為盜版沒有我原本想的那麼嚴重}
+  \radioitem{看法沒有改變}
+  \radioitem{我本來就沒有使用盜版，此問不適用}
+\end{itemize}
+
+% ═══════════════════════════════════════════════════════════════
+\section*{E 部分｜合理使用範圍}
+% ═══════════════════════════════════════════════════════════════
+
+\textit{請針對以下各情境，分別回答兩個問題：}
+\begin{itemize}[noitemsep]
+  \item \textbf{甲} — 你認為這個行為屬於盜版嗎？（1 = 完全不是，5 = 絕對是）
+  \item \textbf{乙} — 你認為這個行為應該被允許嗎？（○ 應該 ／ ○ 不應該 ／ ○ 無所謂）
+\end{itemize}
+
+\bigskip
+
+\setlength{\tabcolsep}{8pt}
+\renewcommand{\arraystretch}{2.2}
+
+\begin{tabularx}{\textwidth}{@{} p{0.44\textwidth} X p{4.2cm} @{}}
+\toprule
+\textbf{情境} & \textbf{甲 是否屬於盜版？} & \textbf{乙 應否被允許？} \\
+\midrule
+
+\makecell[l]{E1. 在社群媒體分享\\1–2 格漫畫截圖作為感想} &
+\likertfive{不是}{是} &
+$\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
+
+\makecell[l]{E2. 在論壇發文附上\\單集不超過 1/3 的頁面\\（如 PTT C\_Chat 慣例）} &
+\likertfive{不是}{是} &
+$\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
+
+\makecell[l]{E3. 將漫畫下載至個人裝置\\供離線閱讀，不對外分享} &
+\likertfive{不是}{是} &
+$\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
+
+\makecell[l]{E4. 在論壇或群組\\上傳完整單集漫畫} &
+\likertfive{不是}{是} &
+$\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
+
+\makecell[l]{E5. 使用或架設提供\\完整系列的免費閱讀網站} &
+\likertfive{不是}{是} &
+$\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
+
+\bottomrule
+\end{tabularx}
+
+\bigskip
+
+\q{以你個人的標準，你認為「合理使用」的界線在哪裡？有什麼原則讓某些行為在你看來是可以接受的？}
+
+\vspace{3cm}
+\hrule
+\vspace{1cm}
+\hrule
+
+\bigskip
+
+% ═══════════════════════════════════════════════════════════════
+\section*{F 部分｜推廣策略感知}
+% ═══════════════════════════════════════════════════════════════
+
+\textit{本部分與版權定義無關，旨在了解你對不同推廣訊息的感受與反應。}
+
+\bigskip
+
+\q{你是否曾在任何平台（音樂、影音、漫畫等）看過「年度回顧」功能，例如 Spotify Wrapped？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{有，而且很喜歡看}
+  \radioitem{有，但沒什麼特別感覺}
+  \radioitem{有看過，但不太在意}
+  \radioitem{沒有印象}
+\end{itemize}
+
+\bigskip
+
+\q{如果漫畫官方平台在年底推出功能，顯示：「今年你支持了 12 位創作者，為創作生態注入了活力」，你的感受為何？}
+
+\medskip
+\likertfive{完全沒有共鳴}{非常有共鳴，覺得很有意義}
+
+\bigskip
+
+\q{上述這類訊息是否會影響你選擇閱讀管道的決定？}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{會，我會更傾向使用官方平台}
+  \radioitem{可能有一點影響}
+  \radioitem{不會，不影響我的選擇}
+  \radioitem{反而覺得這種訊息有點刻意或說教}
+\end{itemize}
+
+\bigskip
+
+\q{以下四種訊息風格，哪一種你覺得最有共鳴？（單選）}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{「今年你支持了 X 位創作者，讓他們的故事得以繼續。」（情感連結）}
+  \radioitem{「今年你透過官方管道閱讀了 X 部作品。」（中性事實）}
+  \radioitem{「如果你今年的閱讀都透過官方管道，你最愛的作者將多獲得 NT\$X 的收入。」（反事實影響）}
+  \radioitem{「你和 X\% 的讀者一樣，選擇用支持的方式享受漫畫。」（社會規範）}
+\end{itemize}
+
+\bigskip
+
+\q{哪一種訊息風格你覺得最不自然或最像在說教？（單選）}
+\begin{itemize}[leftmargin=2em, itemsep=2pt]
+  \radioitem{情感連結型（「讓他們的故事得以繼續」）}
+  \radioitem{中性事實型（純數字統計）}
+  \radioitem{反事實影響型（「你的選擇讓作者多賺了 NT\$X」）}
+  \radioitem{社會規範型（「X\% 的讀者選擇支持」）}
+\end{itemize}
+
+\bigskip
+
+\q{你認為什麼樣的推廣方式，最可能讓你考慮改用或繼續使用官方閱讀管道？（開放題）}
+
+\vspace{3cm}
+\hrule
+\vspace{1cm}
+\hrule
+
+\bigskip
+
+\begin{center}
+  \textit{感謝你的參與。你的回答將協助我們了解消費者視角，\\
+  並為漫畫產業的版權政策提供更貼近現實的參考依據。}
+\end{center}
+
+% ═══════════════════════════════════════════════════════════════
+% APPENDIX — AI Simulation Persona Prompt
+% ═══════════════════════════════════════════════════════════════
+\newpage
+\section*{附錄：AI 模擬人設提示詞（Persona Prompt）}
+\textit{供 Prism 引擎模擬用，不隨問卷印出。}
+
+\bigskip
+
+\begin{mdframed}[backgroundcolor=lightgray, linewidth=0.5pt,
+                 innerleftmargin=14pt, innerrightmargin=14pt]
+\textbf{〔人設底層提示詞 — 繁體中文版〕}
+
+\medskip
+你是一位台灣的大學生，年齡介於 18 至 25 歲之間。\texttt{[segment\_description]}
+
+你平時有閱讀漫畫的習慣，對於不同的閱讀平台有一定的使用經驗。
+請以第一人稱誠實回答以下問卷，根據你自身的習慣、想法與感受作答。
+回答時不需要顯得「政治正確」或「道德高尚」，請反映你真實的行為與態度。
+
+\medskip
+\textbf{你的基本背景設定：}
+\begin{itemize}[noitemsep]
+  \item 閱讀頻率：\texttt{[frequency]}
+  \item 慣用平台類型：\texttt{[platform\_types]}
+  \item 對版權議題的關注程度：\texttt{[copyright\_awareness\_level]}（低 / 中 / 高）
+  \item 是否曾使用非官方來源：\texttt{[has\_used\_piracy]}（是 / 否 / 不確定）
+  \item 社交圈對盜版的態度：\texttt{[peer\_norm]}（普遍接受 / 中立 / 普遍反對）
+\end{itemize}
+
+\medskip
+\textbf{回答格式說明：}
+\begin{itemize}[noitemsep]
+  \item 單選題：回答選項編號（如：\texttt{B}）
+  \item 複選題：回答所有選擇的編號（如：\texttt{A, C, E}）
+  \item Likert 題：回答 1 至 5 的整數
+  \item 開放題：以 1 至 3 句話作答，使用自然、口語的繁體中文
+\end{itemize}
+\end{mdframed}
+
+\bigskip
+
+\textbf{段別（Segment）範例設定：}
+
+\medskip
+\begin{tabularx}{\textwidth}{@{} l X X X X @{}}
+\toprule
+\textbf{段別} & \textbf{描述} & \textbf{閱讀頻率} & \textbf{慣用平台} & \textbf{盜版使用} \\
+\midrule
+重度盜版用戶 & 主要依賴非官方來源，認為盜版無害 & 每天 & 非官方網站 & 是 \\
+混合型用戶 & 官方非官方皆用，依作品決定 & 每週數次 & 混合 & 是 \\
+官方付費用戶 & 習慣付費，偶爾接受朋友分享 & 每週數次 & 官方平台 & 不確定 \\
+輕度閱讀者 & 偶爾看，不特別在意來源 & 每月數次 & 社群媒體 & 不確定 \\
+不閱讀者 & 幾乎不讀漫畫，無相關習慣 & 幾乎不讀 & 無 & 否 \\
+\bottomrule
+\end{tabularx}
+
+\end{document}
