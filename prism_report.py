@@ -50,7 +50,8 @@ conn.execute("""
         segment      TEXT,
         question_id  TEXT,
         raw_response TEXT,
-        parsed_value TEXT
+        parsed_value TEXT,
+        pmf          TEXT
     )
 """)
 conn.execute("""
@@ -72,8 +73,9 @@ conn.execute("""
     )
 """)
 conn.executemany(
-    "INSERT INTO responses (segment, question_id, raw_response, parsed_value) VALUES (?,?,?,?)",
-    [(r["segment"], r["question_id"], r["raw_response"], r["parsed_value"]) for r in rows]
+    "INSERT INTO responses (segment, question_id, raw_response, parsed_value, pmf) VALUES (?,?,?,?,?)",
+    [(r["segment"], r["question_id"], r["raw_response"], r["parsed_value"],
+      json.dumps(r["pmf"]) if r.get("pmf") is not None else None) for r in rows]
 )
 if REPORT and "segments" in REPORT:
     conn.executemany(
@@ -107,6 +109,14 @@ def mean(vals):
     v = [float(x) for x in vals
          if x not in (None, "None", "") and re.match(r'^[\d.]+$', str(x))]
     return round(sum(v) / len(v), 2) if v else None
+
+def stdev(vals):
+    v = [float(x) for x in vals
+         if x not in (None, "None", "") and re.match(r'^[\d.]+$', str(x))]
+    if len(v) < 2:
+        return None
+    m = sum(v) / len(v)
+    return round((sum((x - m) ** 2 for x in v) / (len(v) - 1)) ** 0.5, 2)
 
 def is_numeric(vals):
     count = sum(1 for v in vals
@@ -342,6 +352,34 @@ def svg_heatmap(row_labels, col_labels, matrix, cell_w=100, cell_h=26, label_w=1
     return "".join(parts)
 
 
+def _svg_pmf_dist(seg_labels, pmf_rows, width=460, height=60):
+    """Small stacked pmf bar for each segment showing SSR Likert distribution."""
+    COLORS_5 = ["#d73027", "#fc8d59", "#ffffbf", "#91cf60", "#1a9850"]
+    LM, RM, TM = 4, 4, 18
+    bw = (width - LM - RM) / max(len(seg_labels), 1)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'style="font-family:system-ui,sans-serif;font-size:8px;display:block;margin-top:4px">'
+        f'<text x="{LM}" y="10" fill="#aaa" font-size="8">SSR distribution</text>'
+    ]
+    bar_h = height - TM - 4
+    for j, (seg, pmf) in enumerate(zip(seg_labels, pmf_rows)):
+        x0 = LM + j * bw
+        cx = x0 + bw * 0.1
+        bw2 = bw * 0.8
+        y_off = TM
+        for i, p in enumerate(pmf):
+            seg_h = bar_h * p
+            parts.append(
+                f'<rect x="{_p(cx)}" y="{_p(y_off + bar_h - sum(bar_h * pmf[k] for k in range(i+1)))}" '
+                f'width="{_p(bw2)}" height="{_p(max(1, seg_h))}" fill="{COLORS_5[i]}" opacity="0.85"/>'
+            )
+        short = seg[:10]
+        parts.append(f'<text x="{_p(cx + bw2/2)}" y="{_p(height - 2)}" text-anchor="middle" fill="#666">{esc(short)}</text>')
+    parts.append('</svg>')
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Build chart grid for per-question section
 # ---------------------------------------------------------------------------
@@ -382,7 +420,32 @@ for qid in questions:
     # ── Likert neutral ──
     elif qtype == "likert5":
         means = [mean([r["parsed_value"] for r in by_seg_q[(seg, qid)]]) for seg in segments]
-        chart_html = svg_vbar(segments, means, vmin=1, vmax=5) + hist_row_html(qid)
+        sds   = [stdev([r["parsed_value"] for r in by_seg_q[(seg, qid)]]) for seg in segments]
+        sd_labels = " &nbsp;|&nbsp; ".join(
+            f'<span style="color:{c}">{esc(s)} σ={_p(sd) if sd else "—"}</span>'
+            for s, sd, c in zip(segments, sds, SEG_COLORS)
+        )
+        sd_row = f'<div style="font-size:9px;color:#888;margin-top:3px">{sd_labels}</div>'
+        # If SSR pmf data is available, show aggregate distribution bar
+        pmf_rows = []
+        for seg in segments:
+            pmf_vals = []
+            for r in by_seg_q[(seg, qid)]:
+                raw_pmf = r.get("pmf")
+                if raw_pmf is not None:
+                    try:
+                        p = json.loads(raw_pmf) if isinstance(raw_pmf, str) else raw_pmf
+                        if isinstance(p, list) and len(p) == 5:
+                            pmf_vals.append(p)
+                    except Exception:
+                        pass
+            if pmf_vals:
+                avg_pmf = [round(sum(p[i] for p in pmf_vals) / len(pmf_vals), 3) for i in range(5)]
+                pmf_rows.append(avg_pmf)
+        pmf_html = ""
+        if pmf_rows:
+            pmf_html = _svg_pmf_dist(segments, pmf_rows)
+        chart_html = svg_vbar(segments, means, vmin=1, vmax=5) + hist_row_html(qid) + sd_row + pmf_html
         title = qtext[:90]
 
     # ── WTP ──

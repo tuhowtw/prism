@@ -72,6 +72,7 @@ with open(_run_file, "w", encoding="utf-8") as _f:
             "question_id": r.question_id,
             "raw_response": r.raw_response,
             "parsed_value": str(r.parsed_value),
+            "pmf": r.pmf,
         }) + "\n")
 print(f"      Raw responses saved → {_run_file}\n")
 

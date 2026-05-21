@@ -449,11 +449,162 @@ def page_clarify():
                     )
                     _ss_set("segments", segments)
                     _ss_set("questions", questions)
-                    _ss_set("phase", "run")
-                    save_manifest(_build_manifest("run"))
+                    _ss_set("phase", "preview")
+                    st.session_state.pop("preview_del_qs", None)
+                    save_manifest(_build_manifest("preview"))
                     st.rerun()
                 except Exception as e:
                     st.error(f"Survey generation failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Phase: Preview
+# ---------------------------------------------------------------------------
+
+_Q_TYPES = ["likert5", "binary", "wtp", "open", "multi_select"]
+_CONDITIONS = ["neutral", "anonymous", "named"]
+
+TYPE_BADGE_CSS = {
+    "likert5":      ("Likert 1–5",   "#F59E0B", "#fff"),
+    "binary":       ("Yes / No",     "#10B981", "#fff"),
+    "wtp":          ("WTP",          "#EC4899", "#fff"),
+    "open":         ("Open",         "#6366F1", "#fff"),
+    "multi_select": ("Multi-select", "#3B82F6", "#fff"),
+}
+
+
+def page_preview():
+    st.title("Review Survey Design")
+    st.caption("Edit segments or questions, then click **Run Simulation** to proceed.")
+
+    segments: list[Segment] = _ss_get("segments", [])
+    questions: list[SurveyQuestion] = _ss_get("questions", [])
+
+    if "preview_del_qs" not in st.session_state:
+        st.session_state["preview_del_qs"] = set()
+
+    tab_segs, tab_qs = st.tabs([
+        f"Segments ({len(segments)})",
+        f"Questions ({len(questions) - len(st.session_state['preview_del_qs'])})",
+    ])
+
+    # ---- Segments tab -------------------------------------------------------
+    with tab_segs:
+        new_segments: list[Segment] = []
+        for i, seg in enumerate(segments):
+            with st.container(border=True):
+                col_name, col_w = st.columns([3, 1])
+                with col_name:
+                    name = st.text_input("Name", value=seg.name, key=f"ps_name_{i}")
+                with col_w:
+                    weight = st.number_input(
+                        "Weight", value=float(seg.weight),
+                        min_value=0.0, max_value=1.0, step=0.05,
+                        key=f"ps_w_{i}",
+                    )
+                rationale = st.text_input("Rationale", value=seg.rationale, key=f"ps_rat_{i}")
+                with st.expander("Persona description"):
+                    desc = st.text_area(
+                        "Persona", value=seg.description,
+                        key=f"ps_desc_{i}", height=100, label_visibility="collapsed",
+                    )
+                new_segments.append(Segment(name=name, description=desc, weight=weight, rationale=rationale))
+
+        total_w = sum(s.weight for s in new_segments)
+        if abs(total_w - 1.0) > 0.01:
+            col_warn, col_norm = st.columns([3, 1])
+            with col_warn:
+                st.warning(f"Weights sum to {total_w:.2f} — normalize before running.")
+            with col_norm:
+                if st.button("Normalize", use_container_width=True):
+                    if total_w > 0:
+                        new_segments = [
+                            Segment(s.name, s.description, round(s.weight / total_w, 4), s.rationale)
+                            for s in new_segments
+                        ]
+                    _ss_set("segments", new_segments)
+                    st.rerun()
+
+        _ss_set("segments", new_segments)
+
+    # ---- Questions tab ------------------------------------------------------
+    with tab_qs:
+        new_questions: list[SurveyQuestion] = []
+        del_set: set = st.session_state["preview_del_qs"]
+
+        for i, q in enumerate(questions):
+            if i in del_set:
+                continue
+            badge_text, bg, fg = TYPE_BADGE_CSS.get(q.type, (q.type, "#ccc", "#333"))
+            with st.container(border=True):
+                col_id, col_badge, col_del = st.columns([3, 2, 1])
+                with col_id:
+                    st.markdown(f"**{q.id}**")
+                with col_badge:
+                    qtype = st.selectbox(
+                        "Type",
+                        _Q_TYPES,
+                        index=_Q_TYPES.index(q.type) if q.type in _Q_TYPES else 0,
+                        key=f"pq_type_{i}",
+                        label_visibility="collapsed",
+                    )
+                with col_del:
+                    if st.button("✕", key=f"pq_del_{i}", help="Remove this question"):
+                        del_set.add(i)
+                        st.session_state["preview_del_qs"] = del_set
+                        st.rerun()
+
+                text = st.text_area(
+                    "Question text", value=q.text,
+                    key=f"pq_text_{i}", height=68, label_visibility="collapsed",
+                )
+
+                col_cond, col_scale = st.columns(2)
+                with col_cond:
+                    cond = st.selectbox(
+                        "Condition", _CONDITIONS,
+                        index=_CONDITIONS.index(q.condition) if q.condition in _CONDITIONS else 0,
+                        key=f"pq_cond_{i}",
+                    )
+                with col_scale:
+                    scale = st.text_input(
+                        "Scale label", value=q.scale_label or "",
+                        key=f"pq_scale_{i}",
+                    )
+
+                opts = q.options
+                if qtype == "multi_select":
+                    opts_str = st.text_input(
+                        "Options (comma-separated)",
+                        value=", ".join(q.options),
+                        key=f"pq_opts_{i}",
+                    )
+                    opts = [o.strip() for o in opts_str.split(",") if o.strip()]
+
+                new_questions.append(SurveyQuestion(
+                    id=q.id, text=text, type=qtype,
+                    scale_label=scale, options=opts, condition=cond,
+                ))
+
+        _ss_set("questions", new_questions)
+
+        remaining = len(new_questions)
+        if remaining < len(questions):
+            st.caption(f"{len(questions) - remaining} question(s) removed. They won't be run.")
+
+    st.divider()
+    col_back, col_spacer, col_run = st.columns([1, 2, 2])
+    with col_back:
+        if st.button("← Regenerate"):
+            st.session_state.pop("preview_del_qs", None)
+            _ss_set("phase", "clarify")
+            st.rerun()
+    with col_run:
+        if st.button("▶ Run Simulation", type="primary", use_container_width=True):
+            st.session_state.pop("preview_del_qs", None)
+            _ss_set("phase", "run")
+            save_manifest(_build_manifest("run"))
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -711,14 +862,6 @@ def page_results():
         st.subheader("Survey Design")
         st.caption("Generated by Agent 1 based on your input and clarifications.")
 
-        TYPE_BADGE_CSS = {
-            "likert5":     ("Likert 1–5",   "#F59E0B", "#fff"),
-            "binary":      ("Yes / No",      "#10B981", "#fff"),
-            "wtp":         ("WTP",           "#EC4899", "#fff"),
-            "open":        ("Open",          "#6366F1", "#fff"),
-            "multi_select":("Multi-select",  "#3B82F6", "#fff"),
-        }
-
         for q in questions:
             badge_text, bg, fg = TYPE_BADGE_CSS.get(q.type, (q.type, "#ccc", "#333"))
             cond_tag = f" [{q.condition}]" if q.condition != "neutral" else ""
@@ -835,6 +978,8 @@ if phase == "setup":
     page_setup()
 elif phase == "clarify":
     page_clarify()
+elif phase == "preview":
+    page_preview()
 elif phase == "run":
     page_run()
 elif phase == "results":
