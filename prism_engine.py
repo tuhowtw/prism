@@ -30,16 +30,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-AGENT_MODEL = os.getenv("PRISM_AGENT_MODEL", "claude-sonnet-4-6")
-SIM_MODEL   = os.getenv("PRISM_SIM_MODEL",   "gemini/gemini-2.0-flash")
-EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "text-embedding-3-small")
+AGENT_MODEL = os.getenv("PRISM_AGENT_MODEL", "gemini/gemini-3.1-flash-lite")
+SIM_MODEL   = os.getenv("PRISM_SIM_MODEL",   "gemini/gemini-3.1-flash-lite")
+EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "gemini/gemini-3.1-flash-lite")
 
 # If true, _chat/_achat will pass api_key=None to litellm (reads from env).
 # Set PRISM_ALLOW_ENV_KEY=true for local dev / existing scripts.
 ALLOW_ENV_KEY = os.getenv("PRISM_ALLOW_ENV_KEY", "false").lower() == "true"
 
 # Suppress litellm success logs
+os.environ["LITELLM_TELEMETRY"] = "False"
 litellm.success_callback = []
+litellm.failure_callback = []
+litellm.callbacks = []
+litellm.suppress_debug_info = True
 litellm.set_verbose = False
 
 
@@ -76,6 +80,12 @@ class ClarifyQuestion:
     allow_freeform: bool  # if True, GUI adds "Other..." free-text box
     skippable: bool       # if True, GUI shows "Let agent decide" button
     priority: str         # "must" | "nice" — GUI hides "nice" behind expander
+
+@dataclass
+class MediaHeadline:
+    platform: str
+    content: str
+    sentiment: str  # "positive", "negative", "neutral"
 
 @dataclass
 class SimulatedResponse:
@@ -134,10 +144,13 @@ def _chat(
         try:
             response = litellm.completion(**call_kwargs)
             return response.choices[0].message.content.strip()
+        # 請找到這段並替換：
         except litellm.exceptions.RateLimitError:
-            if attempt == 7:
+            print(f"⚠️ [DEBUG-Engine] 觸發 Google 流量限制 (Agent)！強制等待 {delay} 秒... (第 {attempt+1} 次嘗試)")
+            if attempt == 7: # 注意這裡是 7，不是 max_retries - 1
                 raise
-            time.sleep(delay)
+            import time
+            time.sleep(delay)  # <== 這裡是普通的 time.sleep，沒有 await
             delay = min(delay * 1.5, 120.0)
 
 
@@ -293,7 +306,7 @@ def run_agent1_clarify(input_text: str, api_key: str | None = None) -> list[Clar
         model=AGENT_MODEL,
         system=AGENT1_CLARIFY_SYSTEM,
         user=f"Policy/Product Description:\n\n{input_text}",
-        max_tokens=1024,
+        max_tokens=8192,
         temperature=0.3,
         api_key=api_key,
     )
@@ -465,6 +478,40 @@ def run_agent1_propose(
         for q in data["questions"]
     ]
     return segments, questions
+
+MEDIA_AGENT_SYSTEM = """
+You are a media environment simulator. Based on the provided policy or product description, 
+generate 3 realistic news headlines or social media trending posts that reflect the current public atmosphere.
+Output ONLY valid JSON in this exact schema:
+{
+  "headlines": [
+    {
+      "platform": "News / PTT / Dcard / Threads",
+      "content": "Headline text here",
+      "sentiment": "positive | negative | neutral"
+    }
+  ]
+}
+"""
+
+def run_media_agent(input_text: str, api_key: str | None = None) -> list[MediaHeadline]:
+    """Phase B-2: Generate environmental context (media headlines)."""
+    raw = _chat(
+        model=AGENT_MODEL,
+        system=MEDIA_AGENT_SYSTEM,
+        user=f"Policy/Product Description:\n\n{input_text}",
+        max_tokens=800,
+        temperature=0.7,
+        api_key=api_key,
+    )
+    data = _strip_json(raw)
+    return [
+        MediaHeadline(
+            platform=h["platform"], 
+            content=h["content"], 
+            sentiment=h["sentiment"]
+        ) for h in data.get("headlines", [])
+    ]
 
 
 def run_agent1(input_text: str, api_key: str | None = None) -> tuple[list[Segment], list[SurveyQuestion]]:
@@ -639,17 +686,27 @@ async def _simulate_one(
     segment: Segment,
     question: SurveyQuestion,
     semaphore: asyncio.Semaphore,
+    headlines: list[MediaHeadline] | None = None,  # <== 新增這一行
     api_key: str | None = None,
     max_retries: int = 10,
 ) -> SimulatedResponse:
     instruction = _build_question_instruction(question)
+    
+    # <== 新增：將媒體標題注入到系統提示詞 (System Prompt) 中
+    system_prompt = segment.description
+    if headlines:
+        env_context = "\n\n📰 Current Media & Social Atmosphere:\n" + "\n".join(
+            f"- [{h.platform}] {h.content} (Sentiment: {h.sentiment})" for h in headlines
+        ) + "\n\nPlease consider this social atmosphere when answering."
+        system_prompt += env_context
+
     delay = 20.0
     for attempt in range(max_retries):
         try:
             async with semaphore:
                 raw = await _achat(
                     model=SIM_MODEL,
-                    system=segment.description,
+                    system=system_prompt,  # <== 改用組合好的 system_prompt
                     user=instruction,
                     max_tokens=256,
                     temperature=1.0,
@@ -657,10 +714,12 @@ async def _simulate_one(
                 )
             break
         except litellm.exceptions.RateLimitError:
+            print(f"⚠️ [DEBUG-Engine] 觸發 Google 流量限制 (Simulation)！強制等待 {delay} 秒... (第 {attempt+1} 次嘗試)")
             if attempt == max_retries - 1:
                 raise
-            await asyncio.sleep(delay)
+            await asyncio.sleep(delay) # <== 這裡才有 await
             delay = min(delay * 1.5, 120.0)
+            
     if question.type == "likert5" and question.use_ssr:
         anchors = _resolve_anchors(question)
         pmf, ev = await _ssr_score(raw, anchors)
@@ -685,6 +744,7 @@ async def _simulate_one(
 async def run_simulation_async(
     segments: list[Segment],
     questions: list[SurveyQuestion],
+    headlines: list[MediaHeadline] | None = None,
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
     api_key: str | None = None,
@@ -692,19 +752,25 @@ async def run_simulation_async(
 ) -> list[SimulatedResponse]:
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Pre-embed anchors for SSR questions (once per question, reused across all respondents)
+    print("👉 [DEBUG-Engine] 開始預載入 Embedding (這可能需要幾秒鐘)...")
     await _prewarm_anchor_cache(questions)
+    print("✅ [DEBUG-Engine] Embedding 載入完成！開始派發問卷任務...")
 
     total = len(segments) * len(questions) * responses_per_cell
     completed = 0
 
     async def _sim_with_progress(segment, question):
         nonlocal completed
-        result = await _simulate_one(segment, question, semaphore, api_key=api_key)
-        completed += 1
-        if progress_callback is not None:
-            progress_callback(completed, total)
-        return result
+        try:
+            result = await _simulate_one(segment, question, semaphore, headlines=headlines, api_key=api_key)
+            completed += 1
+            print(f"🟢 [DEBUG-Engine] 模擬成功！目前總進度 {completed}/{total}")
+            if progress_callback is not None:
+                progress_callback(completed, total)
+            return result
+        except Exception as e:
+            print(f"❌ [DEBUG-Engine] 任務失敗 {segment.name} - {question.id}，錯誤：{e}")
+            raise
 
     tasks = [
         _sim_with_progress(segment, question)
@@ -712,13 +778,15 @@ async def run_simulation_async(
         for question in questions
         for _ in range(responses_per_cell)
     ]
+    print(f"👉 [DEBUG-Engine] 共 {len(tasks)} 個任務，準備進行非同步併發...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    print("✅ [DEBUG-Engine] 所有併發任務執行完畢！")
     return [r for r in results if isinstance(r, SimulatedResponse)]
-
 
 def run_simulation(
     segments: list[Segment],
     questions: list[SurveyQuestion],
+    headlines: list[MediaHeadline] | None = None, # <== 新增
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
     api_key: str | None = None,
@@ -726,11 +794,10 @@ def run_simulation(
 ) -> list[SimulatedResponse]:
     return asyncio.run(
         run_simulation_async(
-            segments, questions, responses_per_cell, max_concurrent,
+            segments, questions, headlines, responses_per_cell, max_concurrent, # <== 傳入 headlines
             api_key=api_key, progress_callback=progress_callback,
         )
     )
-
 
 # ---------------------------------------------------------------------------
 # Agent 2: Aggregator & Strategist
@@ -945,8 +1012,12 @@ def run_pipeline(
     cb("Agent 1: Analyzing audience and designing survey...", 0.05)
     segments, questions = run_agent1_propose(input_text, clarifications, api_key=api_key)
 
+    cb("Media Agent: Simulating media environment...", 0.15)
+    headlines = run_media_agent(input_text, api_key=api_key)
+
     cb("Simulation: Running synthetic respondents...", 0.25)
-    responses = run_simulation(segments, questions, responses_per_cell=responses_per_cell, api_key=api_key)
+    # <== 記得把 headlines=headlines 傳進去
+    responses = run_simulation(segments, questions, headlines=headlines, responses_per_cell=responses_per_cell, api_key=api_key)
 
     cb("Aggregating results...", 0.80)
     segment_results = _aggregate_responses(responses, segments, questions)
