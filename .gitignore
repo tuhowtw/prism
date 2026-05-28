@@ -31,3 +31,7 @@ fred_prac/
 guide_lecture/
 literature/
 prism-progress-report.tex
+for_gemini.txt
+my_old_code.txt
+*.txt
+.DS_Store

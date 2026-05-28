@@ -19,6 +19,7 @@ import streamlit as st
 from prism_engine import (
     AnalysisOutput,
     ClarifyQuestion,
+    MediaHeadline,
     Segment,
     SurveyQuestion,
     _aggregate_responses,
@@ -27,6 +28,7 @@ from prism_engine import (
     run_agent1_propose,
     run_agent2,
     run_simulation,
+    run_media_agent,
 )
 from prism_session import (
     clarify_from_dict,
@@ -116,6 +118,7 @@ def _init_ss():
         "model_agent": "gemini/gemini-2.5-flash",
         "model_sim": "gemini/gemini-2.5-flash",
         "imported_questions": [],
+        "headlines": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -131,6 +134,13 @@ def _build_manifest(phase: str) -> dict:
     """Build a manifest dict from current session state (no api_key)."""
     run_id = _ss_get("run_id") or make_run_id(_ss_get("n_per_cell"))
     _ss_set("run_id", run_id)
+    agent2_obj = _ss_get("agent2_output")
+    agent2_dict = {
+        "overall_summary": agent2_obj.overall_summary,
+        "recommendations": agent2_obj.recommendations,
+        "risk_flags": agent2_obj.risk_flags,
+        "target_segment": agent2_obj.target_segment,
+    } if agent2_obj else {}
     return {
         "id": run_id,
         "title": (_ss_get("input_text") or "")[:80],
@@ -142,10 +152,11 @@ def _build_manifest(phase: str) -> dict:
         "segments": [segment_to_dict(s) for s in _ss_get("segments", [])],
         "questions": [question_to_dict(q) for q in _ss_get("questions", [])],
         "n_per_cell": _ss_get("n_per_cell", 8),
-        "model_agent": _ss_get("model_agent", "gemini/gemini-2.5-flash"),
-        "model_sim": _ss_get("model_sim", "gemini/gemini-2.5-flash"),
+        "model_agent": _ss_get("model_agent", "gemini/gemini-3.1-flash-lite"),
+        "model_sim": _ss_get("model_sim", "gemini/gemini-3.1-flash-lite"),
+        "headlines": [{"platform": h.platform, "content": h.content, "sentiment": h.sentiment} for h in _ss_get("headlines", [])],
         "provider": "google",
-        "agent2_output": _ss_get("agent2_output") or {},
+        "agent2_output": agent2_dict,
         "stats": {},
     }
 
@@ -159,8 +170,9 @@ def _load_run_into_session(manifest: dict):
     _ss_set("segments", [segment_from_dict(s) for s in manifest.get("segments", [])])
     _ss_set("questions", [question_from_dict(q) for q in manifest.get("questions", [])])
     _ss_set("n_per_cell", manifest.get("n_per_cell", 8))
-    _ss_set("model_agent", manifest.get("model_agent", "gemini/gemini-2.5-flash"))
-    _ss_set("model_sim", manifest.get("model_sim", "gemini/gemini-2.5-flash"))
+    _ss_set("model_agent", manifest.get("model_agent", "gemini/gemini-3.1-flash-lite"))
+    _ss_set("model_sim", manifest.get("model_sim", "gemini/gemini-3.1-flash-lite"))
+    _ss_set("headlines", [MediaHeadline(**h) if isinstance(h, dict) else h for h in manifest.get("headlines", [])])
     agent2 = manifest.get("agent2_output") or {}
     if agent2:
         seg_results = _aggregate_from_manifest(manifest)
@@ -587,6 +599,8 @@ def page_clarify():
                         _ss_get("input_text"), clarif_text, api_key=api_key
                     )
                     questions = imported_qs if imported_qs else ai_questions
+                    headlines = run_media_agent(_ss_get("input_text"), api_key=api_key)
+                    _ss_set("headlines", headlines)
                     _ss_set("segments", segments)
                     _ss_set("questions", questions)
                     _ss_set("imported_questions", [])
@@ -617,6 +631,14 @@ TYPE_BADGE_CSS = {
 def page_preview():
     st.title("Review Survey Design")
     st.caption("Edit segments or questions, then click **Run Simulation** to proceed.")
+
+    headlines = _ss_get("headlines")
+    if headlines:
+        st.subheader("📰 Simulated Media Environment")
+        for h in headlines:
+            color = "green" if h.sentiment=="positive" else "red" if h.sentiment=="negative" else "gray"
+            st.markdown(f"- **{h.platform}**: {h.content} (:{color}[{h.sentiment}])")
+        st.divider()
 
     segments: list[Segment] = _ss_get("segments", [])
     questions: list[SurveyQuestion] = _ss_get("questions", [])
@@ -796,19 +818,25 @@ def page_run():
         responses_holder = {}
         error_holder = {}
 
+        # 在 page_run() 函數裡面的 _run_sim() 替換成這樣：
+        current_headlines = _ss_get("headlines")
+
         def _run_sim():
-            completed_calls = [0]
+            import os
             def _cb(done, total):
-                completed_calls[0] = done
+                responses_holder["completed"] = done
+
             try:
+                if api_key:
+                    os.environ["GEMINI_API_KEY"] = api_key
                 resp = run_simulation(
                     segments, questions,
+                    headlines=current_headlines,
                     responses_per_cell=n_per_cell,
                     api_key=api_key,
                     progress_callback=_cb,
                 )
                 responses_holder["result"] = resp
-                responses_holder["completed"] = completed_calls[0]
             except Exception as e:
                 error_holder["err"] = str(e)
 
