@@ -32,7 +32,7 @@ load_dotenv()
 
 AGENT_MODEL = os.getenv("PRISM_AGENT_MODEL", "gemini/gemini-3.1-flash-lite")
 SIM_MODEL   = os.getenv("PRISM_SIM_MODEL",   "gemini/gemini-3.1-flash-lite")
-EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "gemini/gemini-3.1-flash-lite")
+EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "gemini/text-embedding-004")
 
 # If true, _chat/_achat will pass api_key=None to litellm (reads from env).
 # Set PRISM_ALLOW_ENV_KEY=true for local dev / existing scripts.
@@ -504,13 +504,18 @@ def run_media_agent(input_text: str, api_key: str | None = None) -> list[MediaHe
         temperature=0.7,
         api_key=api_key,
     )
-    data = _strip_json(raw)
+    try:
+        data = _strip_json(raw)
+    except ValueError:
+        return []
     return [
         MediaHeadline(
-            platform=h["platform"], 
-            content=h["content"], 
-            sentiment=h["sentiment"]
-        ) for h in data.get("headlines", [])
+            platform=h.get("platform", "Unknown"),
+            content=h.get("content", ""),
+            sentiment=h.get("sentiment", "neutral"),
+        )
+        for h in data.get("headlines", [])
+        if h.get("content")
     ]
 
 

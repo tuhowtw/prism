@@ -664,17 +664,12 @@ def page_run():
 
         def _run_sim():
             import os
-            print("\n👉 [DEBUG-UI] 背景模擬執行緒已啟動！")
-            
-            # 強制將網頁上的 API Key 設為環境變數，確保底層所有的模型(包含 Embedding) 都拿得到！
-            os.environ["GEMINI_API_KEY"] = api_key
-            
             def _cb(done, total):
-                print(f"🟢 [DEBUG-UI] 收到進度更新：{done}/{total}")
                 responses_holder["completed"] = done
 
             try:
-                print("👉 [DEBUG-UI] 準備呼叫 run_simulation...")
+                if api_key:
+                    os.environ["GEMINI_API_KEY"] = api_key
                 resp = run_simulation(
                     segments, questions,
                     headlines=current_headlines,
@@ -683,10 +678,8 @@ def page_run():
                     progress_callback=_cb,
                 )
                 responses_holder["result"] = resp
-                print("✅ [DEBUG-UI] run_simulation 成功執行完畢！")
             except Exception as e:
                 error_holder["err"] = str(e)
-                print(f"❌ [DEBUG-UI] 系統發生嚴重錯誤：{e}")
 
         thread = threading.Thread(target=_run_sim, daemon=True)
         thread.start()
