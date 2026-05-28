@@ -146,6 +146,31 @@ for aq in anon_qs:
 named_paired = {nq for _, nq in sdb_pairs.values()}
 anon_set     = {aq for aq, _ in sdb_pairs.values()}
 
+# Sanity-check pairs
+v1_qs  = [q for q in questions if q.endswith("_v1")]
+v2_qs  = [q for q in questions if q.endswith("_v2")]
+pos_qs = [q for q in questions if q.endswith("_pos")]
+neg_qs = [q for q in questions if q.endswith("_neg")]
+
+consistency_pairs = {}  # prefix -> (v1_id, v2_id)
+for v1id in v1_qs:
+    base = v1id[:-3]
+    v2id = next((i for i in v2_qs if i[:-3] == base), None)
+    if v2id:
+        consistency_pairs[base] = (v1id, v2id)
+
+reverse_pairs = {}  # prefix -> (pos_id, neg_id)
+for pid in pos_qs:
+    base = pid[:-4]
+    nid = next((i for i in neg_qs if i[:-4] == base), None)
+    if nid:
+        reverse_pairs[base] = (pid, nid)
+
+sanity_paired = (
+    {v2id for _, v2id in consistency_pairs.values()} |
+    {nid for _, nid in reverse_pairs.values()}
+)
+
 # Question metadata from report JSON (has type, text, condition, options)
 q_meta = {}
 if REPORT and "questions" in REPORT:
@@ -643,6 +668,82 @@ if REPORT and "segments" in REPORT:
     segments_html = "\n".join(seg_cards)
 
 # ---------------------------------------------------------------------------
+# Sanity check tables
+# ---------------------------------------------------------------------------
+PASS_STYLE  = "background:#dcfce7;color:#166534;font-weight:bold"
+FAIL_STYLE  = "background:#fee2e2;color:#991b1b;font-weight:bold"
+
+sanity_rows_consistency = []
+for prefix, (v1id, v2id) in consistency_pairs.items():
+    sanity_rows_consistency.append(
+        f"<tr><th colspan='{len(segments)+4}' style='background:#c5cae9'>"
+        f"Consistency: {esc(prefix)} ({esc(v1id)} vs {esc(v2id)})</th></tr>"
+    )
+    sanity_rows_consistency.append(
+        "<tr><th>Segment</th><th>v1 mean</th><th>v2 mean</th>"
+        "<th>Gap (v1−v2)</th><th>Status (≤ 0.5)</th></tr>"
+    )
+    for seg in segments:
+        m1 = mean([r["parsed_value"] for r in by_seg_q[(seg, v1id)]])
+        m2 = mean([r["parsed_value"] for r in by_seg_q[(seg, v2id)]])
+        if m1 is not None and m2 is not None:
+            gap = round(m1 - m2, 2)
+            passed = abs(gap) <= 0.5
+            style = PASS_STYLE if passed else FAIL_STYLE
+            status = "✓ PASS" if passed else "✗ FAIL"
+            sanity_rows_consistency.append(
+                f'<tr><td>{esc(seg)}</td><td>{m1}</td><td>{m2}</td>'
+                f'<td>{gap:+.2f}</td><td style="{style}">{status}</td></tr>'
+            )
+        else:
+            sanity_rows_consistency.append(
+                f'<tr><td>{esc(seg)}</td><td>{m1}</td><td>{m2}</td>'
+                f'<td>—</td><td>—</td></tr>'
+            )
+
+sanity_rows_reverse = []
+for prefix, (pid, nid) in reverse_pairs.items():
+    sanity_rows_reverse.append(
+        f"<tr><th colspan='{len(segments)+4}' style='background:#c5cae9'>"
+        f"Reverse-coded: {esc(prefix)} ({esc(pid)} + {esc(nid)})</th></tr>"
+    )
+    sanity_rows_reverse.append(
+        "<tr><th>Segment</th><th>pos mean</th><th>neg mean</th>"
+        "<th>Sum (target ≈ 6)</th><th>Status (6.0 ± 1.0)</th></tr>"
+    )
+    for seg in segments:
+        mp = mean([r["parsed_value"] for r in by_seg_q[(seg, pid)]])
+        mn = mean([r["parsed_value"] for r in by_seg_q[(seg, nid)]])
+        if mp is not None and mn is not None:
+            total = round(mp + mn, 2)
+            passed = abs(total - 6.0) <= 1.0
+            style = PASS_STYLE if passed else FAIL_STYLE
+            status = "✓ PASS" if passed else "✗ FAIL"
+            sanity_rows_reverse.append(
+                f'<tr><td>{esc(seg)}</td><td>{mp}</td><td>{mn}</td>'
+                f'<td>{total:.2f}</td><td style="{style}">{status}</td></tr>'
+            )
+        else:
+            sanity_rows_reverse.append(
+                f'<tr><td>{esc(seg)}</td><td>{mp}</td><td>{mn}</td>'
+                f'<td>—</td><td>—</td></tr>'
+            )
+
+sanity_section_html = ""
+if sanity_rows_consistency or sanity_rows_reverse:
+    rows_html_inner = "".join(sanity_rows_consistency + sanity_rows_reverse)
+    sanity_section_html = f"""<section id="s-sanity">
+<h2>Sanity Checks &mdash; Response Consistency</h2>
+<div class="section">
+<p style="font-size:.8rem;color:#64748b;margin-bottom:12px">
+  <b>Consistency pair</b> (gap ≤ 0.5 = PASS): same construct, two wordings — means should match.<br>
+  <b>Reverse-coded pair</b> (sum ≈ 6.0 ± 1.0 = PASS): pos + neg question — coherent respondents sum near 6 on 1–5 scale.
+</p>
+<table><tbody>{rows_html_inner}</tbody></table>
+</div>
+</section>"""
+
+# ---------------------------------------------------------------------------
 # Dynamic title
 # ---------------------------------------------------------------------------
 _title_text = "Prism Report"
@@ -758,6 +859,7 @@ select, input {{ padding:4px 8px; border:1px solid #bbb; border-radius:4px; font
   <a href="#s-segments">Segments</a>
   <a href="#s-survey">Survey Design</a>
   <a href="#s-sdb">SDB Gaps</a>
+  <a href="#s-sanity">Sanity Checks</a>
   <a href="#s-viz">Visualizations</a>
   <a href="#s-raw">Raw Responses</a>
   <div class="toc-label">Filter by Segment</div>
@@ -783,6 +885,8 @@ select, input {{ padding:4px 8px; border:1px solid #bbb; border-radius:4px; font
 </details>
 </div>
 </section>
+
+{sanity_section_html}
 
 <section id="s-viz">
 <h2>Visualizations &mdash; Per-Question Segment Comparison</h2>

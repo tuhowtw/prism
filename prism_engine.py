@@ -408,7 +408,7 @@ Your output must be ONLY valid JSON in this exact schema (no markdown fences, no
 
 Rules:
 - Use 3 to 5 segments. Weights must sum to exactly 1.0.
-- Generate 12 to 15 questions total.
+- Generate 15 to 18 questions total (including the consistency pair, reverse pair, SDB pair, multi_select, WTP, and open).
 - Prefer Likert-5 questions (quantifiable, supports statistical inference).
 - REQUIRED: Include exactly one matched pair of questions measuring the SAME underlying behavior,
   one with condition "anonymous" and one with condition "named". Their ids MUST end with
@@ -416,6 +416,20 @@ Rules:
 - REQUIRED: Include at least one "multi_select" question with 4-6 options in the "options" array.
   Respondents pick all that apply; reply format is comma-separated option letters (A, B, C...).
 - REQUIRED: End with exactly one question of type "open".
+- REQUIRED: Include exactly one consistency pair — two Likert-5 questions measuring the same construct
+  using clearly different wording (paraphrase, not synonym swap). Their ids MUST share a prefix and
+  end with "_v1" and "_v2" respectively (e.g. "trust_policy_v1", "trust_policy_v2"). Both
+  condition "neutral". Choose one of the core survey constructs, not a throwaway topic.
+- REQUIRED: Include exactly one reverse-coded pair — two Likert-5 questions on the same construct
+  with opposite polarity (one positively worded, one negatively worded so that agreeing with one
+  means disagreeing with the other). Their ids MUST share a prefix and end with "_pos" and "_neg"
+  respectively (e.g. "fairness_pos", "fairness_neg"). Both condition "neutral". The scale_label
+  MUST reflect the wording polarity: the "_pos" question uses "1=Strongly Disagree, 5=Strongly Agree"
+  and the "_neg" question uses "1=Strongly Agree, 5=Strongly Disagree" so that a coherent respondent
+  scores approximately the same raw value on both.
+- Sanity-check principle: every survey must include redundancy that lets us detect whether
+  simulated respondents answer coherently. The consistency and reverse-coded pairs are the minimum.
+  Design them on substantive constructs so that failures are meaningful, not filler questions.
 - All other questions use condition "neutral".
 - Persona descriptions must be vivid and realistic (2-4 sentences), written in second person.
 - Questions must be directly relevant to the specific product/policy described.
@@ -835,6 +849,40 @@ def _aggregate_responses(
         if sdb_gaps:
             q_summaries["__sdb_gaps__"] = sdb_gaps
 
+        # Compute sanity-check metrics for consistency (_v1/_v2) and reverse-coded (_pos/_neg) pairs
+        v1_ids = {q.id for q in questions if q.id.endswith("_v1")}
+        v2_ids = {q.id for q in questions if q.id.endswith("_v2")}
+        pos_ids = {q.id for q in questions if q.id.endswith("_pos")}
+        neg_ids = {q.id for q in questions if q.id.endswith("_neg")}
+
+        consistency: dict[str, Any] = {}
+        for v1id in v1_ids:
+            base = v1id[:-3]
+            v2id = next((i for i in v2_ids if i[:-3] == base), None)
+            if v2id is None:
+                continue
+            s1 = q_summaries.get(v1id)
+            s2 = q_summaries.get(v2id)
+            if s1 and s2 and "mean" in s1 and "mean" in s2:
+                gap = round(s1["mean"] - s2["mean"], 2)
+                consistency[base] = {"gap": gap, "pass": abs(gap) <= 0.5}
+        if consistency:
+            q_summaries["__consistency__"] = consistency
+
+        reverse: dict[str, Any] = {}
+        for pid in pos_ids:
+            base = pid[:-4]
+            nid = next((i for i in neg_ids if i[:-4] == base), None)
+            if nid is None:
+                continue
+            sp = q_summaries.get(pid)
+            sn = q_summaries.get(nid)
+            if sp and sn and "mean" in sp and "mean" in sn:
+                total = round(sp["mean"] + sn["mean"], 2)
+                reverse[base] = {"sum": total, "pass": abs(total - 6.0) <= 1.0}
+        if reverse:
+            q_summaries["__reverse__"] = reverse
+
         segment_results.append(SegmentResult(
             segment=seg_map[seg.name],
             question_summaries=q_summaries,
@@ -869,6 +917,9 @@ Return ONLY valid JSON with this schema (no markdown fences):
 Be specific and ground every recommendation in the data. Do not be generic.
 If the data contains paired anonymous/named questions, comment explicitly on the size
 of the social desirability gap and which segments hide their behavior most.
+If sanity checks fail (consistency gap > 0.5 or reverse-coded sum deviates from 6.0 by
+more than 1.0 on any segment), add a specific entry to risk_flags naming the segment,
+the failing pair prefix, and the numeric magnitude. Do NOT silently ignore failures.
 """
 
 
@@ -902,6 +953,12 @@ def run_agent2(
         for t in sr.open_themes[:2]:
             safe_t = t[:120].replace('"', "'").replace('\\', '')
             summary_lines.append(f"  [open] '{safe_t}'")
+        for prefix, c in sr.question_summaries.get("__consistency__", {}).items():
+            status = "PASS" if c["pass"] else "FAIL"
+            summary_lines.append(f"  [Sanity: consistency] {prefix} gap = {c['gap']:+.2f}  {status} (threshold ≤ 0.5)")
+        for prefix, r in sr.question_summaries.get("__reverse__", {}).items():
+            status = "PASS" if r["pass"] else "FAIL"
+            summary_lines.append(f"  [Sanity: reverse] {prefix} sum = {r['sum']:.2f}  {status} (target ≈ 6.0 ± 1.0)")
 
     raw = _chat(
         model=AGENT_MODEL,

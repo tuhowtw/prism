@@ -15,6 +15,7 @@
 \usepackage{titlesec}
 \usepackage{parskip}
 \usepackage{microtype}
+\usepackage{amssymb}
 \usepackage{hyperref}
 
 % ── Colours ───────────────────────────────────────────────────────────────────
@@ -31,11 +32,13 @@
 
 % ── Likert helper ─────────────────────────────────────────────────────────────
 \newcommand{\likertfive}[2]{%
-  \begin{tabular}{@{}ccccc@{}}
-    \footnotesize 1 & \footnotesize 2 & \footnotesize 3 & \footnotesize 4 & \footnotesize 5 \\
-    $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$ \\[2pt]
-    \multicolumn{2}{l}{\footnotesize #1} & & \multicolumn{2}{r}{\footnotesize #2}
-  \end{tabular}%
+  \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}ccccc@{}}
+    \footnotesize 1 & \footnotesize 2 & \footnotesize 3 & \footnotesize 4 & \footnotesize 5 \\[2pt]
+    $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$ & $\bigcirc$
+  \end{tabular*}\par\vspace{3pt}%
+  \begin{tabular*}{\linewidth}{@{}l@{\extracolsep{\fill}}r@{}}
+    \footnotesize #1 & \footnotesize #2
+  \end{tabular*}%
 }
 
 % ── Choice helper ─────────────────────────────────────────────────────────────
@@ -232,12 +235,12 @@
 
 \bigskip
 
-\setlength{\tabcolsep}{8pt}
+\setlength{\tabcolsep}{6pt}
 \renewcommand{\arraystretch}{2.2}
 
-\begin{tabularx}{\textwidth}{@{} p{0.44\textwidth} X p{4.2cm} @{}}
+\begin{tabular}{@{} p{5.0cm} p{5.5cm} p{3.5cm} @{}}
 \toprule
-\textbf{情境} & \textbf{甲 是否屬於盜版？} & \textbf{乙 應否被允許？} \\
+\textbf{情境} & \textbf{甲\enspace 是否屬於盜版？} & \textbf{乙\enspace 應否被允許？} \\
 \midrule
 
 \makecell[l]{E1. 在社群媒體分享\\1–2 格漫畫截圖作為感想} &
@@ -261,7 +264,7 @@ $\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
 $\bigcirc$ 應該 \newline $\bigcirc$ 不應該 \newline $\bigcirc$ 無所謂 \\
 
 \bottomrule
-\end{tabularx}
+\end{tabular}
 
 \bigskip
 

@@ -131,6 +131,8 @@ def question_to_dict(q: SurveyQuestion) -> dict:
         "scale_label": q.scale_label,
         "options": q.options,
         "condition": q.condition,
+        "use_ssr": q.use_ssr,
+        "anchors": q.anchors,
     }
 
 
@@ -165,6 +167,8 @@ def question_from_dict(d: dict) -> SurveyQuestion:
         scale_label=d.get("scale_label", ""),
         options=d.get("options", []),
         condition=d.get("condition", "neutral"),
+        use_ssr=d.get("use_ssr", False),
+        anchors=d.get("anchors", []),
     )
 
 

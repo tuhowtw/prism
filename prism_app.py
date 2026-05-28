@@ -115,6 +115,7 @@ def _init_ss():
         "agent2_output": None,
         "model_agent": "gemini/gemini-2.5-flash",
         "model_sim": "gemini/gemini-2.5-flash",
+        "imported_questions": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -262,7 +263,8 @@ def render_sidebar():
         st.subheader("Past Runs")
         if st.button("New session", use_container_width=True):
             for k in ["phase", "run_id", "input_text", "clarify_questions", "clarify_answers",
-                      "segments", "questions", "responses", "seg_results", "agent2_output"]:
+                      "segments", "questions", "responses", "seg_results", "agent2_output",
+                      "imported_questions"]:
                 st.session_state.pop(k, None)
             _init_ss()
             st.rerun()
@@ -291,6 +293,125 @@ def render_sidebar():
                     st.rerun()
             except Exception as e:
                 st.error(f"Import failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Import helpers
+# ---------------------------------------------------------------------------
+
+def _parse_import_json(uploaded) -> tuple[list, list]:
+    """Parse uploaded JSON file → (questions, segments). Both may be empty."""
+    data = json.loads(uploaded.read().decode("utf-8"))
+    questions = [question_from_dict(q) for q in data.get("questions", [])]
+    segments  = [segment_from_dict(s)  for s in data.get("segments",  [])]
+    return questions, segments
+
+
+def _render_import_panel(input_text: str, api_key: str) -> None:
+    """Renders the import-questions sub-panel inside an expander."""
+    st.caption("Skip AI question design — import a pre-built survey.")
+    uploaded = st.file_uploader("Survey JSON", type=["json"], key="import_uploader")
+    if not uploaded:
+        st.markdown(
+            "JSON format: `{questions: [...], segments: [...]}` "
+            "— segments optional. See handbook §6 for schema."
+        )
+        return
+
+    try:
+        questions, segments = _parse_import_json(uploaded)
+    except Exception as e:
+        st.error(f"Parse error: {e}")
+        return
+
+    st.success(f"Loaded {len(questions)} questions, {len(segments)} segments.")
+
+    warnings = _validate_import(questions, segments)
+    for w in warnings:
+        st.warning(w)
+
+    has_segs = bool(segments)
+    has_qs   = bool(questions)
+    has_input = bool(input_text)
+    has_key   = bool(api_key)
+
+    st.markdown("**Import mode:**")
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        help_a = "Import questions; Agent 1 still generates segments from your description."
+        if st.button(
+            "Questions only →",
+            disabled=not (has_qs and has_input and has_key),
+            help=help_a,
+            key="import_qs_only",
+        ):
+            with st.spinner("Agent 1 generating clarifying questions..."):
+                try:
+                    clarify_qs = run_agent1_clarify(input_text, api_key=api_key)
+                    _ss_set("clarify_questions", clarify_qs)
+                    _ss_set("clarify_answers", {})
+                    _ss_set("imported_questions", questions)
+                    _ss_set("run_id", make_run_id(_ss_get("n_per_cell")))
+                    _ss_set("phase", "clarify")
+                    save_manifest(_build_manifest("clarify"))
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Clarify failed: {e}")
+
+    with col_b:
+        help_b = "Import questions AND segments — skip Agent 1 entirely."
+        if st.button(
+            "Full import →",
+            disabled=not (has_qs and has_segs),
+            help=help_b,
+            key="import_full",
+        ):
+            _ss_set("questions", questions)
+            _ss_set("segments", segments)
+            _ss_set("imported_questions", [])
+            _ss_set("clarify_questions", [])
+            _ss_set("clarify_answers", {})
+            _ss_set("run_id", make_run_id(_ss_get("n_per_cell")))
+            _ss_set("phase", "preview")
+            st.session_state.pop("preview_del_qs", None)
+            save_manifest(_build_manifest("preview"))
+            st.rerun()
+
+
+def _validate_import(questions: list, segments: list) -> list[str]:
+    """Return list of warning strings for missing required survey elements."""
+    warnings = []
+    ids = [q.id for q in questions]
+    types = [q.type for q in questions]
+
+    has_anon  = any(i.endswith("_anon")  for i in ids)
+    has_named = any(i.endswith("_named") for i in ids)
+    if not (has_anon and has_named):
+        warnings.append("Missing SDB pair: need one question id ending in `_anon` and one in `_named`.")
+
+    has_v1 = any(i.endswith("_v1") for i in ids)
+    has_v2 = any(i.endswith("_v2") for i in ids)
+    if not (has_v1 and has_v2):
+        warnings.append("Missing consistency pair: need question ids ending in `_v1` and `_v2`.")
+
+    has_pos = any(i.endswith("_pos") for i in ids)
+    has_neg = any(i.endswith("_neg") for i in ids)
+    if not (has_pos and has_neg):
+        warnings.append("Missing reverse-coded pair: need question ids ending in `_pos` and `_neg`.")
+
+    if "multi_select" not in types:
+        warnings.append("No `multi_select` question found.")
+
+    if "open" not in types:
+        warnings.append("No `open` question found (should be last).")
+
+    if segments:
+        total_weight = round(sum(s.weight for s in segments), 4)
+        if abs(total_weight - 1.0) > 0.01:
+            warnings.append(f"Segment weights sum to {total_weight:.3f}, not 1.0.")
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -332,18 +453,25 @@ def page_setup():
     if not api_key:
         st.info("Enter your Gemini API key in the sidebar to continue.")
 
-    if st.button("Next: Clarify →", type="primary", disabled=not ready):
-        with st.spinner("Agent 1 is generating clarifying questions..."):
-            try:
-                questions = run_agent1_clarify(input_text, api_key=api_key)
-                _ss_set("clarify_questions", questions)
-                _ss_set("clarify_answers", {})
-                _ss_set("run_id", make_run_id(_ss_get("n_per_cell")))
-                _ss_set("phase", "clarify")
-                save_manifest(_build_manifest("clarify"))
-                st.rerun()
-            except Exception as e:
-                st.error(f"Clarify failed: {e}")
+    col_btn, col_import = st.columns([2, 1])
+    with col_btn:
+        if st.button("Next: Clarify →", type="primary", disabled=not ready):
+            with st.spinner("Agent 1 is generating clarifying questions..."):
+                try:
+                    questions = run_agent1_clarify(input_text, api_key=api_key)
+                    _ss_set("clarify_questions", questions)
+                    _ss_set("clarify_answers", {})
+                    _ss_set("imported_questions", [])
+                    _ss_set("run_id", make_run_id(_ss_get("n_per_cell")))
+                    _ss_set("phase", "clarify")
+                    save_manifest(_build_manifest("clarify"))
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Clarify failed: {e}")
+
+    with col_import:
+        with st.expander("Import questions (JSON)"):
+            _render_import_panel(input_text, api_key)
 
     # How it works
     st.divider()
@@ -367,6 +495,13 @@ def page_setup():
 def page_clarify():
     st.title("Clarify Your Study")
     st.caption("Answer these questions to help Agent 1 design a more targeted survey.")
+
+    if _ss_get("imported_questions"):
+        n = len(_ss_get("imported_questions"))
+        st.info(
+            f"**Import mode:** {n} questions loaded. "
+            "Agent 1 will generate segments only — your questions will be used as-is."
+        )
 
     cqs: list[ClarifyQuestion] = _ss_get("clarify_questions", [])
     answers: dict = _ss_get("clarify_answers", {})
@@ -439,16 +574,22 @@ def page_clarify():
             _ss_set("phase", "setup")
             st.rerun()
     with col_next:
-        if st.button("Generate survey →", type="primary"):
-            with st.spinner("Agent 1 is designing your survey..."):
+        imported_qs = _ss_get("imported_questions", [])
+        btn_label = "Generate segments →" if imported_qs else "Generate survey →"
+        spinner_msg = "Agent 1 is generating segments..." if imported_qs else "Agent 1 is designing your survey..."
+
+        if st.button(btn_label, type="primary"):
+            with st.spinner(spinner_msg):
                 try:
                     api_key = _ss_get("api_key", "")
                     clarif_text = format_clarifications(cqs, answers)
-                    segments, questions = run_agent1_propose(
+                    segments, ai_questions = run_agent1_propose(
                         _ss_get("input_text"), clarif_text, api_key=api_key
                     )
+                    questions = imported_qs if imported_qs else ai_questions
                     _ss_set("segments", segments)
                     _ss_set("questions", questions)
+                    _ss_set("imported_questions", [])
                     _ss_set("phase", "preview")
                     st.session_state.pop("preview_del_qs", None)
                     save_manifest(_build_manifest("preview"))
@@ -479,6 +620,24 @@ def page_preview():
 
     segments: list[Segment] = _ss_get("segments", [])
     questions: list[SurveyQuestion] = _ss_get("questions", [])
+
+    # Export current design as importable JSON
+    if questions:
+        export_payload = json.dumps(
+            {
+                "questions": [question_to_dict(q) for q in questions],
+                "segments":  [segment_to_dict(s) for s in segments],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        st.download_button(
+            "Export survey JSON",
+            data=export_payload,
+            file_name=f"survey_{_ss_get('run_id', 'draft')}.json",
+            mime="application/json",
+            help="Download this survey design to re-import in a future run.",
+        )
 
     if "preview_del_qs" not in st.session_state:
         st.session_state["preview_del_qs"] = set()
@@ -584,6 +743,7 @@ def page_preview():
                 new_questions.append(SurveyQuestion(
                     id=q.id, text=text, type=qtype,
                     scale_label=scale, options=opts, condition=cond,
+                    use_ssr=q.use_ssr, anchors=q.anchors,
                 ))
 
         _ss_set("questions", new_questions)
