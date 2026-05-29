@@ -22,6 +22,7 @@ import json
 import os
 import re
 import statistics
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,8 +144,15 @@ def _chat(
     for attempt in range(8):
         try:
             response = litellm.completion(**call_kwargs)
-            return response.choices[0].message.content.strip()
-        # 請找到這段並替換：
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                warnings.warn(
+                    f"[Prism] _chat truncated at {max_tokens} tokens "
+                    f"(finish_reason=length, model={model}). Raise max_tokens for this call.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return choice.message.content.strip()
         except litellm.exceptions.RateLimitError:
             print(f"⚠️ [DEBUG-Engine] 觸發 Google 流量限制 (Agent)！強制等待 {delay} 秒... (第 {attempt+1} 次嘗試)")
             if attempt == 7: # 注意這裡是 7，不是 max_retries - 1
@@ -156,7 +164,7 @@ def _chat(
 
 async def _achat(
     model: str, system: str, user: str,
-    max_tokens: int = 256, temperature: float = 1.0,
+    max_tokens: int = 1024, temperature: float = 1.0,
     api_key: str | None = None,
 ) -> str:
     """Async single-turn chat via LiteLLM."""
@@ -178,7 +186,15 @@ async def _achat(
     if api_key is not None:
         call_kwargs["api_key"] = api_key
     response = await litellm.acompletion(**call_kwargs)
-    return response.choices[0].message.content.strip()
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        warnings.warn(
+            f"[Prism] _achat truncated at {max_tokens} tokens "
+            f"(finish_reason=length, model={model}). Raise max_tokens for this call.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return choice.message.content.strip()
 
 
 def _strip_json(raw: str) -> dict:
@@ -466,7 +482,7 @@ def run_agent1_propose(
     if clarifications:
         user_content += f"\n\nClarification Answers:\n{clarifications}"
 
-    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content, max_tokens=8192, api_key=api_key)
+    raw = _chat(model=AGENT_MODEL, system=AGENT1_PROPOSE_SYSTEM, user=user_content, max_tokens=16384, api_key=api_key)
     data = _strip_json(raw)
 
     segments = [
@@ -637,8 +653,8 @@ def _build_question_instruction(q: SurveyQuestion) -> str:
         if q.use_ssr:
             body = (
                 f"{q.text}\n"
-                f"In 1-2 sentences, describe honestly and specifically how you feel about this. "
-                f"Do not mention numbers or rating scales."
+                f"Write one complete sentence describing honestly how you feel. "
+                f"Do not mention numbers or rating scales. End with a period."
             )
         else:
             body = (
@@ -667,7 +683,10 @@ def _build_question_instruction(q: SurveyQuestion) -> str:
             f"Reply with letters only, no other text."
         )
     else:
-        body = f"{q.text}\nAnswer in 1-2 sentences. Be honest and specific."
+        body = (
+            f"{q.text}\n"
+            f"Write one complete sentence. Be honest and specific to your persona. End with a period."
+        )
     return prefix + body
 
 
@@ -701,6 +720,26 @@ def _parse_response(q: SurveyQuestion, raw: str) -> Any:
         return raw.strip()
 
 
+def _sim_max_tokens(q: SurveyQuestion) -> int:
+    """Return the right max_tokens for a simulation call based on question type.
+
+    Structured answers (single digit, bare number, letter list) need very few tokens.
+    Free-text answers (SSR and open) need enough headroom to complete a full sentence
+    even on thinking models (e.g. Gemini 2.5 Flash) that consume part of the budget
+    for internal reasoning before emitting visible output.
+    """
+    if q.type == "binary":
+        return 16
+    if q.type == "wtp":
+        return 32
+    if q.type == "multi_select":
+        return 64
+    if q.type == "likert5" and not q.use_ssr:
+        return 32
+    # likert5 with use_ssr=True and open: full sentence — absorbs thinking-model overhead
+    return 1024
+
+
 async def _simulate_one(
     segment: Segment,
     question: SurveyQuestion,
@@ -727,7 +766,7 @@ async def _simulate_one(
                     model=SIM_MODEL,
                     system=system_prompt,  # <== 改用組合好的 system_prompt
                     user=instruction,
-                    max_tokens=256,
+                    max_tokens=_sim_max_tokens(question),
                     temperature=1.0,
                     api_key=api_key,
                 )
