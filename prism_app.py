@@ -23,7 +23,12 @@ from prism_engine import (
     Segment,
     SurveyQuestion,
     _aggregate_responses,
+    analyze_run_quality,
+    configure_models,
+    estimate_request_count,
     format_clarifications,
+    format_duration,
+    get_model_config,
     run_agent1_clarify,
     run_agent1_propose,
     run_agent2,
@@ -37,11 +42,12 @@ from prism_session import (
     import_zip,
     list_runs,
     load_manifest,
+    load_responses,
     make_run_id,
     question_from_dict,
     question_to_dict,
-    run_dir,
     save_manifest,
+    save_responses,
     segment_from_dict,
     segment_to_dict,
 )
@@ -90,6 +96,107 @@ EXAMPLES = {
     ),
 }
 
+PROVIDER_LABELS = {
+    "gemini": "Gemini",
+    "openai": "OpenAI",
+    "anthropic": "Claude",
+}
+
+CHAT_MODEL_OPTIONS = {
+    "gemini": [
+        {"label": "Gemini 3.1 Flash Lite (15 RPM conservative)", "model": "gemini/gemini-3.1-flash-lite", "rpm": 15},
+        {"label": "Gemini 2.5 Flash Lite (15 RPM free tier)", "model": "gemini/gemini-2.5-flash-lite", "rpm": 15},
+    ],
+    "openai": [
+        {"label": "GPT-5.5 (500 RPM Tier 1)", "model": "gpt-5.5", "rpm": 500},
+        {"label": "GPT-5.5 Pro (50 RPM Tier 1)", "model": "gpt-5.5-pro", "rpm": 50},
+        {"label": "GPT-5.4 (500 RPM Tier 1)", "model": "gpt-5.4", "rpm": 500},
+        {"label": "GPT-5.4 Mini (500 RPM Tier 1)", "model": "gpt-5.4-mini", "rpm": 500},
+        {"label": "GPT-5.4 Nano (500 RPM Tier 1)", "model": "gpt-5.4-nano", "rpm": 500},
+    ],
+    "anthropic": [
+        {"label": "Claude Opus 4.8 (50 RPM Tier 1)", "model": "anthropic/claude-opus-4-8", "rpm": 50},
+        {"label": "Claude Sonnet 4.6 (50 RPM Tier 1)", "model": "anthropic/claude-sonnet-4-6", "rpm": 50},
+        {"label": "Claude Haiku 4.5 (50 RPM Tier 1)", "model": "anthropic/claude-haiku-4-5-20251001", "rpm": 50},
+    ],
+}
+
+EMBED_MODEL_OPTIONS = {
+    "gemini": [
+        {"label": "Gemini Embedding (15 RPM conservative)", "model": "gemini/gemini-embedding-001", "rpm": 15},
+    ],
+    "openai": [
+        {"label": "text-embedding-3-small (3000 RPM Tier 1)", "model": "text-embedding-3-small", "rpm": 3000},
+        {"label": "text-embedding-3-large (3000 RPM Tier 1)", "model": "text-embedding-3-large", "rpm": 3000},
+    ],
+}
+
+DEFAULT_PROVIDER = "gemini"
+DEFAULT_EMBED_PROVIDER = "gemini"
+
+
+def _option_for_model(options: list[dict], model: str) -> dict | None:
+    return next((opt for opt in options if opt["model"] == model), None)
+
+
+def _select_model_option(label: str, options: list[dict], current_model: str, key: str) -> tuple[str, int | None]:
+    labels = [opt["label"] for opt in options] + ["Custom"]
+    current_option = _option_for_model(options, current_model)
+    index = labels.index(current_option["label"]) if current_option else len(labels) - 1
+    selected_label = st.selectbox(label, labels, index=index, key=f"{key}_select")
+    if selected_label == "Custom":
+        return st.text_input("Custom model", value=current_model, key=f"{key}_custom"), None
+    selected = next(opt for opt in options if opt["label"] == selected_label)
+    return selected["model"], int(selected["rpm"])
+
+
+def _provider_key_label(provider: str) -> tuple[str, str]:
+    if provider == "openai":
+        return "OpenAI API key", "sk-..."
+    if provider == "anthropic":
+        return "Anthropic API key", "sk-ant-..."
+    return "Google Gemini API key", "AIza..."
+
+
+def _normalize_provider(provider: str | None, default: str = DEFAULT_PROVIDER) -> str:
+    value = (provider or default).lower()
+    if value in ("google", "gemini"):
+        return "gemini"
+    if value in ("claude", "anthropic"):
+        return "anthropic"
+    if value == "openai":
+        return "openai"
+    return default
+
+
+def _extract_rpm_limit(response) -> float | None:
+    """Best-effort extraction of request RPM from provider response headers."""
+    header_candidates = []
+    for attr in ("headers", "_response_headers"):
+        headers = getattr(response, attr, None)
+        if headers:
+            header_candidates.append(headers)
+    hidden = getattr(response, "_hidden_params", None)
+    if hidden is None and isinstance(response, dict):
+        hidden = response.get("_hidden_params")
+    if isinstance(hidden, dict):
+        for key in ("headers", "response_headers"):
+            if hidden.get(key):
+                header_candidates.append(hidden[key])
+
+    for headers in header_candidates:
+        if hasattr(headers, "items"):
+            normalized = {str(k).lower(): v for k, v in headers.items()}
+        else:
+            continue
+        for key in ("x-ratelimit-limit-requests", "anthropic-ratelimit-requests-limit"):
+            if key in normalized:
+                try:
+                    return float(normalized[key])
+                except (TypeError, ValueError):
+                    continue
+    return None
+
 # ---------------------------------------------------------------------------
 # Session state helpers
 # ---------------------------------------------------------------------------
@@ -101,10 +208,18 @@ def _ss_set(key, val):
     st.session_state[key] = val
 
 def _init_ss():
+    model_config = get_model_config()
+    legacy_key = st.session_state.get("api_key", "")
     defaults = {
         "phase": "setup",
         "api_key": "",
+        "chat_provider": DEFAULT_PROVIDER,
+        "embed_provider": DEFAULT_EMBED_PROVIDER,
+        "chat_api_key": legacy_key,
+        "embed_api_key": "",
+        "use_same_key_for_embedding": True,
         "key_valid": None,       # None=untested, True=ok, False=failed
+        "embed_key_valid": None,
         "n_per_cell": 8,
         "run_id": None,
         "input_text": "",
@@ -115,15 +230,46 @@ def _init_ss():
         "responses": [],
         "seg_results": [],
         "agent2_output": None,
-        "model_agent": "gemini/gemini-3.1-flash-lite",
-        "model_sim": "gemini/gemini-3.1-flash-lite",
+        "model_agent": model_config["agent_model"],
+        "model_sim": model_config["sim_model"],
+        "model_embed": model_config["embed_model"],
+        "response_language": model_config["response_language"],
+        "requests_per_minute": float(model_config["requests_per_minute"]),
         "headlines": [],
+        "quality_report": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 _init_ss()
+
+
+def _apply_model_config():
+    configure_models(
+        agent_model=_ss_get("model_agent"),
+        sim_model=_ss_get("model_sim"),
+        embed_model=_ss_get("model_embed"),
+        response_language=_ss_get("response_language"),
+        requests_per_minute=_ss_get("requests_per_minute"),
+    )
+
+
+def _effective_chat_api_key() -> str:
+    return _ss_get("chat_api_key") or _ss_get("api_key", "")
+
+
+def _effective_embed_api_key() -> str:
+    chat_provider = _ss_get("chat_provider", DEFAULT_PROVIDER)
+    embed_provider = _ss_get("embed_provider", DEFAULT_EMBED_PROVIDER)
+    same_key_allowed = chat_provider == embed_provider and chat_provider in EMBED_MODEL_OPTIONS
+    if same_key_allowed and _ss_get("use_same_key_for_embedding", True):
+        return _effective_chat_api_key()
+    return _ss_get("embed_api_key", "")
+
+
+def _ssr_questions(questions: list[SurveyQuestion]) -> list[SurveyQuestion]:
+    return [q for q in questions if q.type == "likert5" and q.use_ssr]
 
 # ---------------------------------------------------------------------------
 # Manifest helpers
@@ -151,12 +297,20 @@ def _build_manifest(phase: str) -> dict:
         "segments": [segment_to_dict(s) for s in _ss_get("segments", [])],
         "questions": [question_to_dict(q) for q in _ss_get("questions", [])],
         "n_per_cell": _ss_get("n_per_cell", 8),
-        "model_agent": _ss_get("model_agent", "gemini/gemini-3.1-flash-lite"),
-        "model_sim": _ss_get("model_sim", "gemini/gemini-3.1-flash-lite"),
+        "chat_provider": _ss_get("chat_provider", DEFAULT_PROVIDER),
+        "embed_provider": _ss_get("embed_provider", DEFAULT_EMBED_PROVIDER),
+        "model_agent": _ss_get("model_agent", get_model_config()["agent_model"]),
+        "model_sim": _ss_get("model_sim", get_model_config()["sim_model"]),
+        "model_embed": _ss_get("model_embed", get_model_config()["embed_model"]),
+        "response_language": _ss_get("response_language", get_model_config()["response_language"]),
+        "requests_per_minute": _ss_get("requests_per_minute", float(get_model_config()["requests_per_minute"])),
         "headlines": [{"platform": h.platform, "content": h.content, "sentiment": h.sentiment} for h in _ss_get("headlines", [])],
-        "provider": "google",
+        "provider": _ss_get("chat_provider", DEFAULT_PROVIDER),
         "agent2_output": agent2_dict,
-        "stats": {},
+        "stats": {
+            "response_count": len(_ss_get("responses", [])),
+            "quality_report": _ss_get("quality_report", {}),
+        },
     }
 
 
@@ -169,9 +323,19 @@ def _load_run_into_session(manifest: dict):
     _ss_set("segments", [segment_from_dict(s) for s in manifest.get("segments", [])])
     _ss_set("questions", [question_from_dict(q) for q in manifest.get("questions", [])])
     _ss_set("n_per_cell", manifest.get("n_per_cell", 8))
-    _ss_set("model_agent", manifest.get("model_agent", "gemini/gemini-3.1-flash-lite"))
-    _ss_set("model_sim", manifest.get("model_sim", "gemini/gemini-3.1-flash-lite"))
+    model_config = get_model_config()
+    _ss_set("chat_provider", _normalize_provider(manifest.get("chat_provider", manifest.get("provider", DEFAULT_PROVIDER))))
+    _ss_set("embed_provider", _normalize_provider(manifest.get("embed_provider", DEFAULT_EMBED_PROVIDER), DEFAULT_EMBED_PROVIDER))
+    _ss_set("model_agent", manifest.get("model_agent", model_config["agent_model"]))
+    _ss_set("model_sim", manifest.get("model_sim", model_config["sim_model"]))
+    _ss_set("model_embed", manifest.get("model_embed", model_config["embed_model"]))
+    _ss_set("response_language", manifest.get("response_language", model_config["response_language"]))
+    _ss_set("requests_per_minute", manifest.get("requests_per_minute", float(model_config["requests_per_minute"])))
+    _apply_model_config()
     _ss_set("headlines", [MediaHeadline(**h) if isinstance(h, dict) else h for h in manifest.get("headlines", [])])
+    responses = load_responses(manifest["id"])
+    _ss_set("responses", responses)
+    _ss_set("quality_report", manifest.get("stats", {}).get("quality_report", {}))
     agent2 = manifest.get("agent2_output") or {}
     if agent2:
         seg_results = _aggregate_from_manifest(manifest)
@@ -187,10 +351,93 @@ def _load_run_into_session(manifest: dict):
 
 
 def _aggregate_from_manifest(manifest: dict):
-    """Best-effort: return empty seg_results (full responses not stored in manifest)."""
+    """Rebuild segment results from saved responses when available."""
     segments = [segment_from_dict(s) for s in manifest.get("segments", [])]
+    questions = [question_from_dict(q) for q in manifest.get("questions", [])]
+    responses = load_responses(manifest["id"])
+    if responses and segments and questions:
+        return _aggregate_responses(responses, segments, questions)
     from prism_engine import SegmentResult
     return [SegmentResult(segment=s, question_summaries={}, open_themes=[]) for s in segments]
+
+
+def _build_report_markdown(
+    output: AnalysisOutput,
+    segments: list[Segment],
+    questions: list[SurveyQuestion],
+    quality: dict,
+) -> str:
+    overall = output.overall_summary or {}
+    warnings = quality.get("warnings", []) if quality else []
+    stable_note = (
+        "Prism uses synthetic respondents. Treat these outputs as directional "
+        "hypotheses for follow-up validation, not measured public opinion."
+    )
+    lines = [
+        "# Prism Simulation Report",
+        "",
+        f"Run ID: `{_ss_get('run_id') or 'unsaved'}`",
+        f"Reception score: `{overall.get('weighted_reception_score', 'N/A')}/5`",
+        f"Target segment: `{output.target_segment or 'N/A'}`",
+        "",
+        "## Key Insight",
+        "",
+        overall.get("key_insight", "No key insight available."),
+        "",
+        "## Simulated Findings",
+        "",
+    ]
+
+    for sr in output.segment_results:
+        lines.append(f"### {sr.segment.name}")
+        for qid, stats in sr.question_summaries.items():
+            if qid == "__sdb_gaps__":
+                for pair, gap in stats.items():
+                    lines.append(f"- SDB gap `{pair}`: `{gap:+.2f}` anonymous minus named.")
+                continue
+            if stats.get("type") == "likert5":
+                lines.append(f"- `{qid}` mean: `{stats.get('mean')}/5` (`n={stats.get('n')}`).")
+            elif stats.get("type") == "multi_select":
+                top = sorted(stats.get("rates", {}).items(), key=lambda x: -x[1])[:3]
+                top_text = ", ".join(f"{k}: {v}%" for k, v in top)
+                lines.append(f"- `{qid}` top selections: {top_text}.")
+            elif stats.get("type") == "wtp":
+                lines.append(f"- `{qid}` mean numeric response: `NT${stats.get('mean')}` (`n={stats.get('n')}`).")
+        lines.append("")
+
+    lines.extend([
+        "## Recommendations",
+        "",
+    ])
+    for rec in output.recommendations:
+        lines.append(f"- {rec}")
+
+    lines.extend([
+        "",
+        "## Risk Flags",
+        "",
+    ])
+    for flag in output.risk_flags:
+        lines.append(f"- {flag}")
+
+    lines.extend([
+        "",
+        "## Run Quality",
+        "",
+        f"- Responses: `{quality.get('actual_responses', 0)}/{quality.get('expected_responses', 0)}`",
+        f"- Duplicate cell rate: `{quality.get('duplicate_cell_rate', 0) * 100:.0f}%`",
+        f"- Flat Likert cell rate: `{quality.get('all_same_likert_rate', 0) * 100:.0f}%`",
+        f"- SSR Likert questions: `{quality.get('ssr_question_count', 0)}`",
+        f"- SDB pairs: `{quality.get('sdb_pair_count', 0)}`",
+        "",
+        "## Limitations",
+        "",
+        f"- {stable_note}",
+    ])
+    for warning in warnings:
+        lines.append(f"- Quality warning: {warning}")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -203,60 +450,220 @@ def render_sidebar():
         st.caption("Policy Perception Simulator")
         st.divider()
 
-        # --- API Key ---
-        st.subheader("API Key")
-        raw_key = st.text_input(
-            "Google Gemini API key",
-            value=_ss_get("api_key", ""),
-            type="password",
-            placeholder="AIza...",
-            help="Your key stays in browser memory for this session only. Never written to disk.",
+        # --- Provider and API keys ---
+        st.subheader("Provider")
+        provider_values = list(PROVIDER_LABELS.keys())
+        current_provider = _normalize_provider(_ss_get("chat_provider", DEFAULT_PROVIDER))
+        if current_provider != _ss_get("chat_provider", DEFAULT_PROVIDER):
+            _ss_set("chat_provider", current_provider)
+        provider_label = st.selectbox(
+            "Chat provider",
+            [PROVIDER_LABELS[p] for p in provider_values],
+            index=provider_values.index(current_provider) if current_provider in provider_values else 0,
         )
-        if raw_key != _ss_get("api_key"):
-            _ss_set("api_key", raw_key)
-            _ss_set("key_valid", None)  # reset validation on change
+        chat_provider = next(p for p, label in PROVIDER_LABELS.items() if label == provider_label)
+        if chat_provider != current_provider:
+            _ss_set("chat_provider", chat_provider)
+            chat_default = CHAT_MODEL_OPTIONS[chat_provider][0]
+            _ss_set("model_agent", chat_default["model"])
+            _ss_set("model_sim", chat_default["model"])
+            _ss_set("requests_per_minute", float(chat_default["rpm"]))
+            if chat_provider in EMBED_MODEL_OPTIONS:
+                _ss_set("embed_provider", chat_provider)
+                _ss_set("model_embed", EMBED_MODEL_OPTIONS[chat_provider][0]["model"])
+                _ss_set("use_same_key_for_embedding", True)
+            else:
+                _ss_set("embed_provider", "openai")
+                _ss_set("model_embed", EMBED_MODEL_OPTIONS["openai"][0]["model"])
+                _ss_set("use_same_key_for_embedding", False)
+            _ss_set("key_valid", None)
+            _ss_set("embed_key_valid", None)
+            _ss_set("detected_rpm", None)
+            _apply_model_config()
+            st.rerun()
 
-        st.caption("Your key stays in browser memory for this session only.")
+        chat_label, chat_placeholder = _provider_key_label(chat_provider)
+        raw_chat_key = st.text_input(
+            chat_label,
+            value=_ss_get("chat_api_key", _ss_get("api_key", "")),
+            type="password",
+            placeholder=chat_placeholder,
+            help="Stored only in this browser session. Never written to disk.",
+        )
+        if raw_chat_key != _ss_get("chat_api_key"):
+            _ss_set("chat_api_key", raw_chat_key)
+            _ss_set("api_key", raw_chat_key)  # legacy compatibility
+            _ss_set("key_valid", None)
+            _ss_set("detected_rpm", None)
 
-        col_test, col_status = st.columns([1, 1])
-        with col_test:
-            if st.button("Test key", use_container_width=True):
-                if not raw_key:
+        embed_provider_values = list(EMBED_MODEL_OPTIONS.keys())
+        current_embed_provider = _normalize_provider(_ss_get("embed_provider", DEFAULT_EMBED_PROVIDER), DEFAULT_EMBED_PROVIDER)
+        if current_embed_provider != _ss_get("embed_provider", DEFAULT_EMBED_PROVIDER):
+            _ss_set("embed_provider", current_embed_provider)
+        if current_embed_provider not in embed_provider_values:
+            current_embed_provider = DEFAULT_EMBED_PROVIDER
+        embed_label = st.selectbox(
+            "Embedding provider for SSR",
+            [PROVIDER_LABELS[p] for p in embed_provider_values],
+            index=embed_provider_values.index(current_embed_provider),
+            help="Claude does not provide embeddings here, so SSR needs OpenAI or Gemini embeddings.",
+        )
+        embed_provider = next(p for p, label in PROVIDER_LABELS.items() if label == embed_label)
+        if embed_provider != _ss_get("embed_provider"):
+            _ss_set("embed_provider", embed_provider)
+            _ss_set("model_embed", EMBED_MODEL_OPTIONS[embed_provider][0]["model"])
+            _ss_set("use_same_key_for_embedding", chat_provider == embed_provider)
+            _ss_set("embed_key_valid", None)
+            _ss_set("detected_rpm", None)
+            _apply_model_config()
+            st.rerun()
+
+        same_key_allowed = chat_provider == embed_provider and chat_provider in EMBED_MODEL_OPTIONS
+        if same_key_allowed:
+            use_same = st.checkbox(
+                "Use same key for chat and embeddings",
+                value=_ss_get("use_same_key_for_embedding", True),
+            )
+            if use_same != _ss_get("use_same_key_for_embedding"):
+                _ss_set("use_same_key_for_embedding", use_same)
+                _ss_set("embed_key_valid", None)
+        else:
+            _ss_set("use_same_key_for_embedding", False)
+            st.caption("Embeddings need a separate OpenAI or Gemini key for this chat provider.")
+
+        if not _ss_get("use_same_key_for_embedding", True):
+            embed_key_label, embed_placeholder = _provider_key_label(embed_provider)
+            raw_embed_key = st.text_input(
+                f"{embed_key_label} for embeddings",
+                value=_ss_get("embed_api_key", ""),
+                type="password",
+                placeholder=embed_placeholder,
+                help="Used only for SSR/free-text Likert embedding calls.",
+            )
+            if raw_embed_key != _ss_get("embed_api_key"):
+                _ss_set("embed_api_key", raw_embed_key)
+                _ss_set("embed_key_valid", None)
+                _ss_set("detected_rpm", None)
+
+        st.caption("API keys stay in browser memory for this session only.")
+
+        col_test_chat, col_test_embed = st.columns([1, 1])
+        with col_test_chat:
+            if st.button("Test chat", width="stretch"):
+                if not _effective_chat_api_key():
                     _ss_set("key_valid", False)
                 else:
-                    with st.spinner("Testing..."):
+                    with st.spinner("Testing chat..."):
                         try:
                             import litellm
-                            litellm.completion(
+                            resp = litellm.completion(
                                 model=_ss_get("model_agent"),
                                 messages=[{"role": "user", "content": "Hi"}],
                                 max_tokens=1,
-                                api_key=raw_key,
+                                api_key=_effective_chat_api_key(),
                             )
+                            detected_rpm = _extract_rpm_limit(resp)
+                            if detected_rpm:
+                                _ss_set("requests_per_minute", detected_rpm)
+                                _ss_set("detected_rpm", detected_rpm)
                             _ss_set("key_valid", True)
                         except Exception:
                             _ss_set("key_valid", False)
                     st.rerun()
-        with col_status:
+        with col_test_embed:
+            if st.button("Test embed", width="stretch"):
+                if not _effective_embed_api_key():
+                    _ss_set("embed_key_valid", False)
+                else:
+                    with st.spinner("Testing embedding..."):
+                        try:
+                            import litellm
+                            resp = litellm.embedding(
+                                model=_ss_get("model_embed"),
+                                input=["Prism embedding test"],
+                                api_key=_effective_embed_api_key(),
+                            )
+                            detected_rpm = _extract_rpm_limit(resp)
+                            if detected_rpm:
+                                _ss_set("requests_per_minute", detected_rpm)
+                                _ss_set("detected_rpm", detected_rpm)
+                            _ss_set("embed_key_valid", True)
+                        except Exception:
+                            _ss_set("embed_key_valid", False)
+                    st.rerun()
+
+        chat_status, embed_status = st.columns([1, 1])
+        with chat_status:
             kv = _ss_get("key_valid")
             if kv is True:
-                st.success("Valid")
+                st.success("Chat valid")
             elif kv is False:
-                st.error("Invalid")
+                st.error("Chat invalid")
             else:
-                st.caption("Not tested")
+                st.caption("Chat not tested")
+        with embed_status:
+            ev = _ss_get("embed_key_valid")
+            if ev is True:
+                st.success("Embed valid")
+            elif ev is False:
+                st.error("Embed invalid")
+            elif _ss_get("use_same_key_for_embedding", True):
+                st.caption("Embed uses chat key")
+            else:
+                st.caption("Embed not tested")
+        if _ss_get("detected_rpm"):
+            st.caption(f"Detected RPM from response headers: {_ss_get('detected_rpm'):g}")
 
         st.divider()
 
         # --- Model config ---
         with st.expander("Advanced model config"):
-            model_agent = st.text_input("Agent model", value=_ss_get("model_agent"))
-            model_sim = st.text_input("Simulation model", value=_ss_get("model_sim"))
+            chat_options = CHAT_MODEL_OPTIONS[_normalize_provider(_ss_get("chat_provider", DEFAULT_PROVIDER))]
+            embed_options = EMBED_MODEL_OPTIONS[_normalize_provider(_ss_get("embed_provider", DEFAULT_EMBED_PROVIDER), DEFAULT_EMBED_PROVIDER)]
+            model_agent, agent_rpm = _select_model_option(
+                "Agent model", chat_options, _ss_get("model_agent"), "agent_model"
+            )
+            model_sim, sim_rpm = _select_model_option(
+                "Simulation model", chat_options, _ss_get("model_sim"), "sim_model"
+            )
+            model_embed, embed_rpm = _select_model_option(
+                "Embedding model", embed_options, _ss_get("model_embed"), "embed_model"
+            )
+            suggested_rpms = [rpm for rpm in [agent_rpm, sim_rpm, embed_rpm] if rpm]
+            suggested_rpm = min(suggested_rpms) if suggested_rpms else None
+            rpm = st.number_input(
+                "Requests per minute used for pacing",
+                min_value=0.0,
+                max_value=30000.0,
+                value=float(_ss_get("requests_per_minute", 15)),
+                step=5.0,
+                help="Model labels show official Tier 1 or conservative RPM. This manual value controls Prism's actual pacing.",
+            )
+            if suggested_rpm and st.button(f"Use selected-model RPM ({suggested_rpm})", width="stretch"):
+                _ss_set("requests_per_minute", float(suggested_rpm))
+                _apply_model_config()
+                st.rerun()
+            response_language = st.selectbox(
+                "Response language",
+                ["match_input", "traditional_chinese", "english"],
+                index=["match_input", "traditional_chinese", "english"].index(
+                    _ss_get("response_language")
+                    if _ss_get("response_language") in ["match_input", "traditional_chinese", "english"]
+                    else "match_input"
+                ),
+            )
             if model_agent != _ss_get("model_agent"):
                 _ss_set("model_agent", model_agent)
             if model_sim != _ss_get("model_sim"):
                 _ss_set("model_sim", model_sim)
-            st.caption("Provider v1: Google Gemini only.")
+            if model_embed != _ss_get("model_embed"):
+                _ss_set("model_embed", model_embed)
+            if response_language != _ss_get("response_language"):
+                _ss_set("response_language", response_language)
+            if rpm != _ss_get("requests_per_minute"):
+                _ss_set("requests_per_minute", float(rpm))
+            _apply_model_config()
+            st.caption("RPM is account-tier dependent. Use your provider console as source of truth.")
 
         # --- Simulation settings ---
         st.subheader("Simulation Settings")
@@ -272,9 +679,10 @@ def render_sidebar():
 
         # --- Session list ---
         st.subheader("Past Runs")
-        if st.button("New session", use_container_width=True):
+        if st.button("New session", width="stretch"):
             for k in ["phase", "run_id", "input_text", "clarify_questions", "clarify_answers",
-                      "segments", "questions", "responses", "seg_results", "agent2_output"]:
+                      "segments", "questions", "responses", "seg_results", "agent2_output",
+                      "headlines", "quality_report", "run_estimate", "preview_del_qs"]:
                 st.session_state.pop(k, None)
             _init_ss()
             st.rerun()
@@ -285,7 +693,7 @@ def render_sidebar():
                 ts = m.get("created_at", "")[:16].replace("T", " ")
                 n_seg = len(m.get("segments", []))
                 label = f"{m.get('title', m['id'])[:30]} | {ts} | {n_seg}seg"
-                if st.button(label, key=f"run_{m['id']}", use_container_width=True):
+                if st.button(label, key=f"run_{m['id']}", width="stretch"):
                     _load_run_into_session(m)
                     st.rerun()
         else:
@@ -321,7 +729,7 @@ def page_setup():
     with col_example:
         st.markdown("**Try an example:**")
         for label in EXAMPLES:
-            if st.button(label, use_container_width=True, key=f"ex_{label}"):
+            if st.button(label, width="stretch", key=f"ex_{label}"):
                 _ss_set("input_text", EXAMPLES[label])
                 st.rerun()
 
@@ -338,16 +746,17 @@ def page_setup():
         if input_text:
             _ss_set("input_text", input_text)
 
-    api_key = _ss_get("api_key", "")
-    ready = bool(input_text and api_key)
+    chat_api_key = _effective_chat_api_key()
+    ready = bool(input_text and chat_api_key)
 
-    if not api_key:
-        st.info("Enter your Gemini API key in the sidebar to continue.")
+    if not chat_api_key:
+        st.info("Enter your chat API key in the sidebar to continue.")
 
     if st.button("Next: Clarify →", type="primary", disabled=not ready):
         with st.spinner("Agent 1 is generating clarifying questions..."):
             try:
-                questions = run_agent1_clarify(input_text, api_key=api_key)
+                _apply_model_config()
+                questions = run_agent1_clarify(input_text, api_key=chat_api_key)
                 _ss_set("clarify_questions", questions)
                 _ss_set("clarify_answers", {})
                 _ss_set("run_id", make_run_id(_ss_get("n_per_cell")))
@@ -454,16 +863,23 @@ def page_clarify():
         if st.button("Generate survey →", type="primary"):
             with st.spinner("Agent 1 is designing your survey..."):
                 try:
-                    api_key = _ss_get("api_key", "")
+                    _apply_model_config()
+                    chat_api_key = _effective_chat_api_key()
                     clarif_text = format_clarifications(cqs, answers)
                     segments, questions = run_agent1_propose(
-                        _ss_get("input_text"), clarif_text, api_key=api_key
+                        _ss_get("input_text"), clarif_text, api_key=chat_api_key
                     )
 
-                    headlines = run_media_agent(_ss_get("input_text"), api_key=api_key)
+                    headlines = run_media_agent(_ss_get("input_text"), api_key=chat_api_key)
+                    estimate = estimate_request_count(segments, questions, _ss_get("n_per_cell", 8))
+                    _ss_set("run_estimate", estimate)
                     _ss_set("headlines", headlines)
                     _ss_set("segments", segments)
                     _ss_set("questions", questions)
+                    _ss_set("responses", [])
+                    _ss_set("seg_results", [])
+                    _ss_set("agent2_output", None)
+                    _ss_set("quality_report", {})
                     _ss_set("phase", "preview")
                     st.session_state.pop("preview_del_qs", None)
                     save_manifest(_build_manifest("preview"))
@@ -502,6 +918,19 @@ def page_preview():
 
     segments: list[Segment] = _ss_get("segments", [])
     questions: list[SurveyQuestion] = _ss_get("questions", [])
+    estimate = estimate_request_count(segments, questions, _ss_get("n_per_cell", 8))
+    _ss_set("run_estimate", estimate)
+
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Estimated Requests", estimate["total_requests"])
+        c2.metric("Minimum Runtime", format_duration(estimate["estimated_min_seconds"]))
+        c3.metric("SSR Likert Qs", sum(1 for q in questions if q.type == "likert5" and q.use_ssr))
+        c4.metric("Rate Limit", estimate["rate_limit_summary"].split(" ")[0] + " RPM")
+        if estimate["estimated_min_seconds"] >= 600:
+            st.warning("This run is estimated to take more than 10 minutes under the current RPM limit.")
+        if _ss_get("n_per_cell", 8) < 5:
+            st.warning("n_per_cell is below 5. Use this as a smoke test, not final evidence.")
 
     if "preview_del_qs" not in st.session_state:
         st.session_state["preview_del_qs"] = set()
@@ -539,7 +968,7 @@ def page_preview():
             with col_warn:
                 st.warning(f"Weights sum to {total_w:.2f} — normalize before running.")
             with col_norm:
-                if st.button("Normalize", use_container_width=True):
+                if st.button("Normalize", width="stretch"):
                     if total_w > 0:
                         new_segments = [
                             Segment(s.name, s.description, round(s.weight / total_w, 4), s.rationale)
@@ -604,9 +1033,31 @@ def page_preview():
                     )
                     opts = [o.strip() for o in opts_str.split(",") if o.strip()]
 
+                use_ssr = q.use_ssr
+                anchors = list(q.anchors or [])
+                if qtype == "likert5":
+                    use_ssr = st.checkbox(
+                        "Use SSR/free-text scoring",
+                        value=q.use_ssr,
+                        key=f"pq_ssr_{i}",
+                        help="Collects a short free-text answer and maps it to a Likert score with embeddings.",
+                    )
+                    if use_ssr:
+                        anchors_text = st.text_area(
+                            "SSR anchors (one per line, low to high)",
+                            value="\n".join(anchors),
+                            key=f"pq_anchors_{i}",
+                            height=92,
+                        )
+                        anchors = [a.strip() for a in anchors_text.splitlines() if a.strip()]
+                else:
+                    use_ssr = False
+                    anchors = []
+
                 new_questions.append(SurveyQuestion(
                     id=q.id, text=text, type=qtype,
                     scale_label=scale, options=opts, condition=cond,
+                    use_ssr=use_ssr, anchors=anchors,
                 ))
 
         _ss_set("questions", new_questions)
@@ -623,7 +1074,7 @@ def page_preview():
             _ss_set("phase", "clarify")
             st.rerun()
     with col_run:
-        if st.button("▶ Run Simulation", type="primary", use_container_width=True):
+        if st.button("▶ Run Simulation", type="primary", width="stretch"):
             st.session_state.pop("preview_del_qs", None)
             _ss_set("phase", "run")
             save_manifest(_build_manifest("run"))
@@ -639,8 +1090,17 @@ def page_run():
 
     segments: list[Segment] = _ss_get("segments", [])
     questions: list[SurveyQuestion] = _ss_get("questions", [])
-    api_key = _ss_get("api_key", "")
+    chat_api_key = _effective_chat_api_key()
+    embed_api_key = _effective_embed_api_key()
     n_per_cell = _ss_get("n_per_cell", 8)
+    if not _ss_get("run_id"):
+        _ss_set("run_id", make_run_id(n_per_cell))
+    if not chat_api_key:
+        st.error("Chat API key is required to run the simulation.")
+        return
+    if _ssr_questions(questions) and not embed_api_key:
+        st.error("SSR/free-text Likert questions need an embedding API key. Add one in the sidebar or turn off SSR in Preview.")
+        return
 
     # Step 1 — Survey Design (already done)
     with st.container(border=True):
@@ -651,7 +1111,12 @@ def page_run():
     with st.container(border=True):
         st.markdown("**Step 2 — Simulating Responses**")
         total_calls = len(segments) * len(questions) * n_per_cell
-        st.caption(f"Total API calls: {total_calls}")
+        estimate = estimate_request_count(segments, questions, n_per_cell)
+        st.caption(
+            f"Simulation calls: {total_calls}. Estimated total requests including SSR/analysis: "
+            f"{estimate['total_requests']} ({format_duration(estimate['estimated_min_seconds'])} minimum at "
+            f"{estimate['rate_limit_summary']})."
+        )
 
         prog_bar = st.progress(0)
         prog_text = st.empty()
@@ -659,34 +1124,34 @@ def page_run():
         responses_holder = {}
         error_holder = {}
 
-        # 在 page_run() 函數裡面的 _run_sim() 替換成這樣：
         current_headlines = _ss_get("headlines")
+        model_agent = _ss_get("model_agent")
+        model_sim = _ss_get("model_sim")
+        model_embed = _ss_get("model_embed")
+        response_language = _ss_get("response_language")
+        requests_per_minute = _ss_get("requests_per_minute")
+        _ss_set("quality_report", {})
 
         def _run_sim():
-            import os
-            print("\n👉 [DEBUG-UI] 背景模擬執行緒已啟動！")
-            
-            # 強制將網頁上的 API Key 設為環境變數，確保底層所有的模型(包含 Embedding) 都拿得到！
-            os.environ["GEMINI_API_KEY"] = api_key
-            
+            print("\nStarting background simulation thread.")
+
             def _cb(done, total):
-                print(f"🟢 [DEBUG-UI] 收到進度更新：{done}/{total}")
                 responses_holder["completed"] = done
 
             try:
-                print("👉 [DEBUG-UI] 準備呼叫 run_simulation...")
+                configure_models(model_agent, model_sim, model_embed, response_language, requests_per_minute)
                 resp = run_simulation(
                     segments, questions,
                     headlines=current_headlines,
                     responses_per_cell=n_per_cell,
-                    api_key=api_key,
+                    chat_api_key=chat_api_key,
+                    embed_api_key=embed_api_key,
                     progress_callback=_cb,
                 )
                 responses_holder["result"] = resp
-                print("✅ [DEBUG-UI] run_simulation 成功執行完畢！")
             except Exception as e:
                 error_holder["err"] = str(e)
-                print(f"❌ [DEBUG-UI] 系統發生嚴重錯誤：{e}")
+                print(f"Simulation failed: {e}")
 
         thread = threading.Thread(target=_run_sim, daemon=True)
         thread.start()
@@ -709,14 +1174,18 @@ def page_run():
         prog_text.caption(f"Simulation complete — {len(responses_holder['result'])} responses")
         responses = responses_holder["result"]
         _ss_set("responses", responses)
+        quality = analyze_run_quality(responses, segments, questions, n_per_cell)
+        _ss_set("quality_report", quality)
+        save_responses(_ss_get("run_id"), responses)
 
     # Step 3 — Agent 2
     with st.container(border=True):
         st.markdown("**Step 3 — Strategic Analysis**")
         with st.spinner("Agent 2 is generating recommendations..."):
             try:
+                _apply_model_config()
                 seg_results = _aggregate_responses(responses, segments, questions)
-                output = run_agent2(seg_results, questions, _ss_get("input_text"), api_key=api_key)
+                output = run_agent2(seg_results, questions, _ss_get("input_text"), api_key=chat_api_key)
                 _ss_set("seg_results", seg_results)
                 _ss_set("agent2_output", output)
                 st.success("Analysis complete.")
@@ -739,6 +1208,10 @@ def page_results():
     segments: list[Segment] = _ss_get("segments", [])
     questions: list[SurveyQuestion] = _ss_get("questions", [])
     responses = _ss_get("responses", [])
+    quality = _ss_get("quality_report", {})
+    if responses and not quality:
+        quality = analyze_run_quality(responses, segments, questions, _ss_get("n_per_cell", 8))
+        _ss_set("quality_report", quality)
 
     if output is None:
         st.warning("No results available. Run a study first.")
@@ -777,9 +1250,9 @@ def page_results():
 
     st.divider()
 
-    # --- 5 tabs ---
-    tab_overview, tab_seg, tab_design, tab_recs, tab_raw = st.tabs(
-        ["Overview", "Segments", "Survey Design", "Recommendations", "Raw Data"]
+    # --- 7 tabs ---
+    tab_overview, tab_seg, tab_design, tab_quality, tab_recs, tab_report, tab_raw = st.tabs(
+        ["Overview", "Segments", "Survey Design", "Quality", "Recommendations", "Report", "Raw Data"]
     )
 
     # =================== Tab 1: Overview ===================
@@ -792,7 +1265,7 @@ def page_results():
         col1, col2 = st.columns(2)
         with col1:
             fig_pie = plotly_pie(seg_labels, seg_weights, title="Segment Population Weights")
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
 
         # Find first likert question for quick bar
         first_likert = next((q for q in questions if q.type == "likert5" and q.condition == "neutral"), None)
@@ -808,11 +1281,12 @@ def page_results():
                     y_label="Mean (1–5)",
                     vmin=1, vmax=5,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
         # SDB pair chart
         anon_q = next((q for q in questions if q.id.endswith("_anon")), None)
         named_q = next((q for q in questions if q.id.endswith("_named")), None)
+        heatmap_col = None
         if anon_q and named_q:
             anon_vals = []
             named_vals = []
@@ -827,7 +1301,8 @@ def page_results():
                     seg_labels, anon_vals, named_vals,
                     title="Social Desirability Bias: Anon vs Named"
                 )
-                st.plotly_chart(fig_sdb, use_container_width=True)
+                st.plotly_chart(fig_sdb, width="stretch")
+            heatmap_col = col4
 
         # Multi-select heatmap
         ms_q = next((q for q in questions if q.type == "multi_select"), None)
@@ -843,13 +1318,14 @@ def page_results():
                     else:
                         row.append(None)
                 matrix.append(row)
-            target_col = col4 if anon_q and named_q else col3
-            with target_col:
+            if heatmap_col is None:
+                _, heatmap_col = st.columns(2)
+            with heatmap_col:
                 fig_hm = plotly_heatmap(
                     opts, seg_labels, matrix,
                     title=f"Multi-select: {ms_q.text[:50]}..."
                 )
-                st.plotly_chart(fig_hm, use_container_width=True)
+                st.plotly_chart(fig_hm, width="stretch")
 
     # =================== Tab 2: Segments ===================
     with tab_seg:
@@ -923,7 +1399,42 @@ def page_results():
                 st.markdown(f"**Rationale:** {seg.rationale}")
                 st.markdown(f"**Persona prompt:**\n\n> {seg.description}")
 
-    # =================== Tab 4: Recommendations ===================
+    # =================== Tab 4: Quality ===================
+    with tab_quality:
+        st.subheader("Run Quality")
+        if not quality:
+            st.caption("No quality report available.")
+        else:
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric("Expected Responses", quality.get("expected_responses", "—"))
+            q2.metric("Actual Responses", quality.get("actual_responses", "—"))
+            q3.metric("Duplicate Cells", f"{quality.get('duplicate_cell_rate', 0) * 100:.0f}%")
+            q4.metric("Flat Likert Cells", f"{quality.get('all_same_likert_rate', 0) * 100:.0f}%")
+
+            warnings = quality.get("warnings", [])
+            if warnings:
+                for warning in warnings:
+                    st.warning(warning)
+            else:
+                st.success("No major quality warnings detected.")
+
+            detail_rows = []
+            for item in quality.get("missing_cells", []):
+                detail_rows.append({"type": "missing", **item})
+            for item in quality.get("duplicate_cells", [])[:25]:
+                detail_rows.append({"type": "duplicate", **item})
+            for item in quality.get("all_same_likert_cells", [])[:25]:
+                detail_rows.append({"type": "flat_likert", **item})
+            for item in quality.get("length_finished_cells", [])[:25]:
+                detail_rows.append({"type": "max_tokens", **item})
+            for item in quality.get("incomplete_open_cells", [])[:25]:
+                detail_rows.append({"type": "incomplete_open", **item})
+            for item in quality.get("short_ssr_cells", [])[:25]:
+                detail_rows.append({"type": "short_ssr", **item})
+            if detail_rows:
+                st.dataframe(pd.DataFrame(detail_rows), width="stretch", hide_index=True)
+
+    # =================== Tab 5: Recommendations ===================
     with tab_recs:
         st.subheader("Strategic Recommendations")
 
@@ -948,7 +1459,19 @@ def page_results():
                     unsafe_allow_html=True,
                 )
 
-    # =================== Tab 5: Raw Data ===================
+    # =================== Tab 6: Report ===================
+    with tab_report:
+        st.subheader("Report Mode")
+        report_md = _build_report_markdown(output, segments, questions, quality)
+        st.download_button(
+            "Download report markdown",
+            report_md.encode("utf-8"),
+            file_name=f"{_ss_get('run_id') or 'prism'}_report.md",
+            mime="text/markdown",
+        )
+        st.markdown(report_md)
+
+    # =================== Tab 7: Raw Data ===================
     with tab_raw:
         st.subheader("Raw Simulated Responses")
 
@@ -962,7 +1485,7 @@ def page_results():
                 }
                 for r in responses
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
             df_full = pd.DataFrame([
                 {

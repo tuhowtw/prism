@@ -14,6 +14,11 @@ Author: Macro Economics Simulation Suite
 Based on: Dynamic Optimization & Vibe Coding Lecture Notes
 """
 
+import os
+from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path(".cache/matplotlib").resolve()))
+
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns

@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import zipfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
 
 # Import dataclasses from engine for serialization helpers
-from prism_engine import Segment, SurveyQuestion, ClarifyQuestion
+from prism_engine import Segment, SurveyQuestion, ClarifyQuestion, SimulatedResponse
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -106,6 +104,10 @@ def import_zip(zip_bytes: bytes) -> str:
             raise ValueError("Empty zip archive")
         # First path component is the run_id directory
         run_id = Path(names[0]).parts[0]
+        for name in names:
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or path.parts[0] != run_id:
+                raise ValueError("Unsafe zip archive path")
         zf.extractall(RUNS_DIR)
     return run_id
 
@@ -131,6 +133,8 @@ def question_to_dict(q: SurveyQuestion) -> dict:
         "scale_label": q.scale_label,
         "options": q.options,
         "condition": q.condition,
+        "use_ssr": q.use_ssr,
+        "anchors": q.anchors,
     }
 
 
@@ -165,6 +169,8 @@ def question_from_dict(d: dict) -> SurveyQuestion:
         scale_label=d.get("scale_label", ""),
         options=d.get("options", []),
         condition=d.get("condition", "neutral"),
+        use_ssr=d.get("use_ssr", False),
+        anchors=d.get("anchors", []),
     )
 
 
@@ -180,3 +186,48 @@ def clarify_from_dict(d: dict) -> ClarifyQuestion:
         skippable=d.get("skippable", True),
         priority=d.get("priority", "nice"),
     )
+
+
+def response_to_dict(r: SimulatedResponse) -> dict:
+    return {
+        "segment_name": r.segment_name,
+        "persona_detail": r.persona_detail,
+        "question_id": r.question_id,
+        "raw_response": r.raw_response,
+        "parsed_value": r.parsed_value,
+        "pmf": r.pmf,
+        "finish_reason": r.finish_reason,
+    }
+
+
+def response_from_dict(d: dict) -> SimulatedResponse:
+    return SimulatedResponse(
+        segment_name=d.get("segment_name", d.get("segment", "")),
+        persona_detail=d.get("persona_detail", ""),
+        question_id=d["question_id"],
+        raw_response=d.get("raw_response", ""),
+        parsed_value=d.get("parsed_value"),
+        pmf=d.get("pmf"),
+        finish_reason=d.get("finish_reason"),
+    )
+
+
+def save_responses(run_id: str, responses: list[SimulatedResponse]) -> None:
+    """Persist raw simulated responses separately from the lightweight manifest."""
+    d = run_dir(run_id)
+    target = d / "responses.json"
+    tmp = d / "responses.json.tmp"
+    payload = [response_to_dict(r) for r in responses]
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(target)
+
+
+def load_responses(run_id: str) -> list[SimulatedResponse]:
+    p = RUNS_DIR / run_id / "responses.json"
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [response_from_dict(d) for d in data]

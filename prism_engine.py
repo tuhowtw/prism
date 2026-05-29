@@ -22,6 +22,7 @@ import json
 import os
 import re
 import statistics
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,11 +33,23 @@ load_dotenv()
 
 AGENT_MODEL = os.getenv("PRISM_AGENT_MODEL", "gemini/gemini-3.1-flash-lite")
 SIM_MODEL   = os.getenv("PRISM_SIM_MODEL",   "gemini/gemini-3.1-flash-lite")
-EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "gemini/gemini-3.1-flash-lite")
+EMBED_MODEL = os.getenv("PRISM_EMBED_MODEL", "gemini/gemini-embedding-001")
 
 # If true, _chat/_achat will pass api_key=None to litellm (reads from env).
 # Set PRISM_ALLOW_ENV_KEY=true for local dev / existing scripts.
 ALLOW_ENV_KEY = os.getenv("PRISM_ALLOW_ENV_KEY", "false").lower() == "true"
+REQUESTS_PER_MINUTE = float(os.getenv("PRISM_REQUESTS_PER_MINUTE", "15"))
+RATE_LIMIT_BUFFER_SECONDS = float(os.getenv("PRISM_RATE_LIMIT_BUFFER_SECONDS", "0.2"))
+RATE_LIMIT_RETRY_SECONDS = float(os.getenv("PRISM_RATE_LIMIT_RETRY_SECONDS", "65"))
+TRANSIENT_RETRY_SECONDS = float(os.getenv("PRISM_TRANSIENT_RETRY_SECONDS", "20"))
+TRANSIENT_MAX_DELAY_SECONDS = float(os.getenv("PRISM_TRANSIENT_MAX_DELAY_SECONDS", "120"))
+RESPONSE_LANGUAGE = os.getenv("PRISM_RESPONSE_LANGUAGE", "match_input")
+AUTO_SSR_LIKERTS = int(os.getenv("PRISM_AUTO_SSR_LIKERTS", "4"))
+MIN_REQUEST_INTERVAL_SECONDS = (
+    (60.0 / REQUESTS_PER_MINUTE) + RATE_LIMIT_BUFFER_SECONDS
+    if REQUESTS_PER_MINUTE > 0
+    else 0.0
+)
 
 # Suppress litellm success logs
 os.environ["LITELLM_TELEMETRY"] = "False"
@@ -45,6 +58,59 @@ litellm.failure_callback = []
 litellm.callbacks = []
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
+
+
+def configure_models(
+    agent_model: str | None = None,
+    sim_model: str | None = None,
+    embed_model: str | None = None,
+    response_language: str | None = None,
+    requests_per_minute: float | int | str | None = None,
+) -> None:
+    """Update module-level model config after import.
+
+    Streamlit keeps model names in session state, while this engine reads model
+    names into globals at import time. This function bridges those two worlds.
+    """
+    global AGENT_MODEL, SIM_MODEL, EMBED_MODEL, RESPONSE_LANGUAGE
+    global REQUESTS_PER_MINUTE, MIN_REQUEST_INTERVAL_SECONDS
+
+    if agent_model:
+        AGENT_MODEL = agent_model
+        os.environ["PRISM_AGENT_MODEL"] = agent_model
+    if sim_model:
+        SIM_MODEL = sim_model
+        os.environ["PRISM_SIM_MODEL"] = sim_model
+    if embed_model:
+        if embed_model != EMBED_MODEL and "_ANCHOR_EMBED_CACHE" in globals():
+            _ANCHOR_EMBED_CACHE.clear()
+        EMBED_MODEL = embed_model
+        os.environ["PRISM_EMBED_MODEL"] = embed_model
+    if response_language:
+        RESPONSE_LANGUAGE = response_language
+        os.environ["PRISM_RESPONSE_LANGUAGE"] = response_language
+    if requests_per_minute is not None:
+        rpm = float(requests_per_minute)
+        if rpm < 0:
+            raise ValueError("requests_per_minute must be >= 0")
+        REQUESTS_PER_MINUTE = rpm
+        os.environ["PRISM_REQUESTS_PER_MINUTE"] = f"{rpm:g}"
+        MIN_REQUEST_INTERVAL_SECONDS = (
+            (60.0 / REQUESTS_PER_MINUTE) + RATE_LIMIT_BUFFER_SECONDS
+            if REQUESTS_PER_MINUTE > 0
+            else 0.0
+        )
+
+
+def get_model_config() -> dict[str, str]:
+    return {
+        "agent_model": AGENT_MODEL,
+        "sim_model": SIM_MODEL,
+        "embed_model": EMBED_MODEL,
+        "response_language": RESPONSE_LANGUAGE,
+        "requests_per_minute": str(REQUESTS_PER_MINUTE),
+        "min_request_interval_seconds": f"{MIN_REQUEST_INTERVAL_SECONDS:.2f}",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +161,7 @@ class SimulatedResponse:
     raw_response: str
     parsed_value: Any           # numeric for likert/wtp/binary, str for open; float ev for SSR
     pmf: list | None = None     # 5-element Likert pmf from SSR; None for DLR/other types
+    finish_reason: str | None = None
 
 @dataclass
 class SegmentResult:
@@ -111,17 +178,127 @@ class AnalysisOutput:
     target_segment: str
 
 
+@dataclass
+class ChatResult:
+    text: str
+    finish_reason: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_LAST_REQUEST_AT = 0.0
+_ASYNC_RATE_LOCK: asyncio.Lock | None = None
+_ASYNC_RATE_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _rate_limit_summary() -> str:
+    if MIN_REQUEST_INTERVAL_SECONDS <= 0:
+        return "disabled"
+    return (
+        f"{REQUESTS_PER_MINUTE:g} RPM "
+        f"({MIN_REQUEST_INTERVAL_SECONDS:.1f}s between request starts)"
+    )
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """Return True for provider errors that are worth retrying."""
+    class_name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    markers = (
+        "ratelimit",
+        "rate limit",
+        "serviceunavailable",
+        "unavailable",
+        "temporarily",
+        "high demand",
+        "503",
+        "502",
+        "504",
+        "timeout",
+        "timed out",
+        "connection",
+        "internalserver",
+        "internal server",
+    )
+    return any(marker in class_name or marker in message for marker in markers)
+
+
+def estimate_request_count(
+    segments: list[Segment],
+    questions: list[SurveyQuestion],
+    responses_per_cell: int,
+    include_agent2: bool = True,
+) -> dict[str, Any]:
+    """Estimate model requests and minimum runtime for a prepared simulation."""
+    sim_calls = len(segments) * len(questions) * responses_per_cell
+    ssr_questions = [q for q in questions if q.type == "likert5" and q.use_ssr]
+    ssr_response_embeddings = len(segments) * len(ssr_questions) * responses_per_cell
+    unique_anchor_sets = {tuple(_resolve_anchors(q)) for q in ssr_questions}
+    ssr_anchor_embeddings = 5 * len(unique_anchor_sets)
+    agent_calls = 1 if include_agent2 else 0
+    total = sim_calls + ssr_response_embeddings + ssr_anchor_embeddings + agent_calls
+    min_seconds = total * MIN_REQUEST_INTERVAL_SECONDS
+    return {
+        "simulation_calls": sim_calls,
+        "ssr_response_embedding_calls": ssr_response_embeddings,
+        "ssr_anchor_embedding_calls": ssr_anchor_embeddings,
+        "agent_calls": agent_calls,
+        "total_requests": total,
+        "estimated_min_seconds": round(min_seconds),
+        "rate_limit_summary": _rate_limit_summary(),
+    }
+
+
+def format_duration(seconds: int | float) -> str:
+    seconds = int(round(seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def _wait_for_rate_limit_sync() -> None:
+    """Pace synchronous API calls to avoid provider RPM limits."""
+    global _LAST_REQUEST_AT
+    if MIN_REQUEST_INTERVAL_SECONDS <= 0:
+        return
+    now = time.monotonic()
+    wait = _LAST_REQUEST_AT + MIN_REQUEST_INTERVAL_SECONDS - now
+    if wait > 0:
+        time.sleep(wait)
+        now = time.monotonic()
+    _LAST_REQUEST_AT = now
+
+
+async def _wait_for_rate_limit_async() -> None:
+    """Pace async API calls across all concurrent simulation tasks."""
+    global _LAST_REQUEST_AT, _ASYNC_RATE_LOCK, _ASYNC_RATE_LOCK_LOOP
+    if MIN_REQUEST_INTERVAL_SECONDS <= 0:
+        return
+    loop = asyncio.get_running_loop()
+    if _ASYNC_RATE_LOCK is None or _ASYNC_RATE_LOCK_LOOP is not loop:
+        _ASYNC_RATE_LOCK = asyncio.Lock()
+        _ASYNC_RATE_LOCK_LOOP = loop
+    async with _ASYNC_RATE_LOCK:
+        now = time.monotonic()
+        wait = _LAST_REQUEST_AT + MIN_REQUEST_INTERVAL_SECONDS - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+            now = time.monotonic()
+        _LAST_REQUEST_AT = now
+
 
 def _chat(
     model: str, system: str, user: str,
     max_tokens: int = 2048, temperature: float = 0.7,
     api_key: str | None = None,
 ) -> str:
-    """Synchronous single-turn chat via LiteLLM with retry on 429."""
-    import time
+    """Synchronous single-turn chat via LiteLLM with retry on transient errors."""
     if api_key is None and not ALLOW_ENV_KEY:
         raise RuntimeError(
             "No API key provided. Set PRISM_ALLOW_ENV_KEY=true for local dev "
@@ -131,7 +308,6 @@ def _chat(
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    delay = 20.0
     call_kwargs: dict = dict(
         model=model,
         messages=messages,
@@ -140,18 +316,29 @@ def _chat(
     )
     if api_key is not None:
         call_kwargs["api_key"] = api_key
+    rate_delay = RATE_LIMIT_RETRY_SECONDS
+    transient_delay = TRANSIENT_RETRY_SECONDS
     for attempt in range(8):
         try:
+            _wait_for_rate_limit_sync()
             response = litellm.completion(**call_kwargs)
             return response.choices[0].message.content.strip()
-        # 請找到這段並替換：
-        except litellm.exceptions.RateLimitError:
-            print(f"⚠️ [DEBUG-Engine] 觸發 Google 流量限制 (Agent)！強制等待 {delay} 秒... (第 {attempt+1} 次嘗試)")
-            if attempt == 7: # 注意這裡是 7，不是 max_retries - 1
+        except Exception as exc:
+            if not _is_transient_llm_error(exc) or attempt == 7:
                 raise
-            import time
-            time.sleep(delay)  # <== 這裡是普通的 time.sleep，沒有 await
-            delay = min(delay * 1.5, 120.0)
+            is_rate_limit = isinstance(exc, litellm.exceptions.RateLimitError)
+            wait = rate_delay if is_rate_limit else transient_delay
+            label = "rate limit" if is_rate_limit else "transient provider"
+            print(
+                f"{label.title()} error during agent call; waiting {wait:.1f}s "
+                f"before retry {attempt + 2}/8."
+            )
+            time.sleep(wait)
+            if is_rate_limit:
+                rate_delay = min(rate_delay * 1.5, TRANSIENT_MAX_DELAY_SECONDS)
+            else:
+                transient_delay = min(transient_delay * 1.5, TRANSIENT_MAX_DELAY_SECONDS)
+    raise RuntimeError("Agent call failed after retries.")
 
 
 async def _achat(
@@ -160,6 +347,23 @@ async def _achat(
     api_key: str | None = None,
 ) -> str:
     """Async single-turn chat via LiteLLM."""
+    result = await _achat_result(
+        model=model,
+        system=system,
+        user=user,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        api_key=api_key,
+    )
+    return result.text
+
+
+async def _achat_result(
+    model: str, system: str, user: str,
+    max_tokens: int = 256, temperature: float = 1.0,
+    api_key: str | None = None,
+) -> ChatResult:
+    """Async single-turn chat via LiteLLM with finish_reason metadata."""
     if api_key is None and not ALLOW_ENV_KEY:
         raise RuntimeError(
             "No API key provided. Set PRISM_ALLOW_ENV_KEY=true for local dev "
@@ -177,8 +381,13 @@ async def _achat(
     )
     if api_key is not None:
         call_kwargs["api_key"] = api_key
+    await _wait_for_rate_limit_async()
     response = await litellm.acompletion(**call_kwargs)
-    return response.choices[0].message.content.strip()
+    choice = response.choices[0]
+    return ChatResult(
+        text=choice.message.content.strip(),
+        finish_reason=getattr(choice, "finish_reason", None),
+    )
 
 
 def _strip_json(raw: str) -> dict:
@@ -188,6 +397,24 @@ def _strip_json(raw: str) -> dict:
     if start == -1 or end == -1:
         raise ValueError(f"No JSON object found in response:\n{raw[:500]}")
     return json.loads(raw[start:end + 1])
+
+
+def _parse_clarify_questions(raw: str) -> list[ClarifyQuestion]:
+    data = _strip_json(raw)
+    return [
+        ClarifyQuestion(
+            id=q["id"],
+            axis=q["axis"],
+            text=q["text"],
+            why=q["why"],
+            answer_type=q["answer_type"],
+            options=q.get("options", []),
+            allow_freeform=q.get("allow_freeform", True),
+            skippable=q.get("skippable", True),
+            priority=q.get("priority", "nice"),
+        )
+        for q in data["questions"]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -302,29 +529,32 @@ _CONDITION_PREFIX = {
 
 def run_agent1_clarify(input_text: str, api_key: str | None = None) -> list[ClarifyQuestion]:
     """Phase A — return adaptive clarifying questions as structured ClarifyQuestion list."""
+    base_user = f"Policy/Product Description:\n\n{input_text}"
     raw = _chat(
         model=AGENT_MODEL,
         system=AGENT1_CLARIFY_SYSTEM,
-        user=f"Policy/Product Description:\n\n{input_text}",
-        max_tokens=8192,
+        user=base_user,
+        max_tokens=2048,
         temperature=0.3,
         api_key=api_key,
     )
-    data = _strip_json(raw)
-    return [
-        ClarifyQuestion(
-            id=q["id"],
-            axis=q["axis"],
-            text=q["text"],
-            why=q["why"],
-            answer_type=q["answer_type"],
-            options=q.get("options", []),
-            allow_freeform=q.get("allow_freeform", True),
-            skippable=q.get("skippable", True),
-            priority=q.get("priority", "nice"),
+    try:
+        return _parse_clarify_questions(raw)
+    except (ValueError, json.JSONDecodeError, KeyError, TypeError):
+        retry_user = (
+            f"{base_user}\n\n"
+            "Retry instruction: return compact valid JSON only. Use at most 3 questions, "
+            "at most 4 options per question, short ids, and one short sentence for why."
         )
-        for q in data["questions"]
-    ]
+        raw = _chat(
+            model=AGENT_MODEL,
+            system=AGENT1_CLARIFY_SYSTEM,
+            user=retry_user,
+            max_tokens=4096,
+            temperature=0.2,
+            api_key=api_key,
+        )
+        return _parse_clarify_questions(raw)
 
 
 def format_clarifications(questions: list[ClarifyQuestion], answers: dict[str, str]) -> str:
@@ -423,9 +653,14 @@ Rules:
 - Use 3 to 5 segments. Weights must sum to exactly 1.0.
 - Generate 12 to 15 questions total.
 - Prefer Likert-5 questions (quantifiable, supports statistical inference).
-- REQUIRED: Include exactly one matched pair of questions measuring the SAME underlying behavior,
-  one with condition "anonymous" and one with condition "named". Their ids MUST end with
-  "_anon" and "_named" respectively (same prefix). This is the social-desirability bias pair.
+- Include a matched anonymous/named social-desirability pair ONLY when the study contains
+  a genuinely sensitive, stigmatized, illegal, embarrassing, or reputation-risk behavior
+  that is central to the research objective. If there is no central sensitive behavior,
+  do not force an SDB pair.
+- When an SDB pair is warranted, include exactly one matched pair measuring the SAME
+  underlying behavior, one with condition "anonymous" and one with condition "named".
+  Their ids MUST end with "_anon" and "_named" respectively (same prefix). The behavior
+  must directly affect the product/policy decision, not be a tangential curiosity.
 - REQUIRED: Include at least one "multi_select" question with 4-6 options in the "options" array.
   Respondents pick all that apply; reply format is comma-separated option letters (A, B, C...).
 - REQUIRED: End with exactly one question of type "open".
@@ -477,6 +712,7 @@ def run_agent1_propose(
         )
         for q in data["questions"]
     ]
+    questions = _apply_ssr_defaults(questions)
     return segments, questions
 
 MEDIA_AGENT_SYSTEM = """
@@ -561,6 +797,32 @@ def _resolve_anchors(q: SurveyQuestion) -> list[str]:
     return _GENERIC_ANCHORS_AGREEMENT
 
 
+def _should_auto_ssr(q: SurveyQuestion) -> bool:
+    if q.type != "likert5" or q.use_ssr or q.condition != "neutral":
+        return False
+    text = f"{q.text} {q.scale_label}".lower()
+    keywords = (
+        "agree", "likely", "intent", "trust", "confidence", "concern",
+        "important", "reasonable", "appealing", "prefer", "satisfied",
+        "support", "willing",
+    )
+    return any(k in text for k in keywords)
+
+
+def _apply_ssr_defaults(questions: list[SurveyQuestion]) -> list[SurveyQuestion]:
+    """Enable SSR for a small number of key Likert questions when Agent 1 omits it."""
+    enabled = sum(1 for q in questions if q.type == "likert5" and q.use_ssr)
+    for q in questions:
+        if enabled >= AUTO_SSR_LIKERTS:
+            break
+        if _should_auto_ssr(q):
+            q.use_ssr = True
+            if not q.anchors:
+                q.anchors = _resolve_anchors(q)
+            enabled += 1
+    return questions
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5
@@ -570,13 +832,34 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-async def _aembed(text: str) -> list[float]:
-    """Embed a single string via litellm (uses OPENAI_API_KEY from env)."""
-    resp = await litellm.aembedding(model=EMBED_MODEL, input=[text])
-    return resp.data[0]["embedding"]
+async def _aembed(text: str, api_key: str | None = None) -> list[float]:
+    """Embed a single string via LiteLLM with retry on transient provider errors."""
+    call_kwargs: dict[str, Any] = {"model": EMBED_MODEL, "input": [text]}
+    if api_key is not None:
+        call_kwargs["api_key"] = api_key
+    delay = TRANSIENT_RETRY_SECONDS
+    for attempt in range(6):
+        try:
+            await _wait_for_rate_limit_async()
+            resp = await litellm.aembedding(**call_kwargs)
+            return resp.data[0]["embedding"]
+        except Exception as exc:
+            if not _is_transient_llm_error(exc) or attempt == 5:
+                raise
+            print(
+                f"Transient provider error during embedding; waiting {delay:.1f}s "
+                f"before retry {attempt + 2}/6."
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, TRANSIENT_MAX_DELAY_SECONDS)
+    raise RuntimeError("Embedding call failed after retries.")
 
 
-async def _ssr_score(response_text: str, anchors: list[str]) -> tuple[list[float], float]:
+async def _ssr_score(
+    response_text: str,
+    anchors: list[str],
+    api_key: str | None = None,
+) -> tuple[list[float], float]:
     """Map a free-text response to a Likert pmf via cosine similarity to anchors.
 
     Returns (pmf, expected_value) where pmf is length-5 and ev is in [1, 5].
@@ -584,9 +867,9 @@ async def _ssr_score(response_text: str, anchors: list[str]) -> tuple[list[float
     """
     key = tuple(anchors)
     if key not in _ANCHOR_EMBED_CACHE:
-        _ANCHOR_EMBED_CACHE[key] = [await _aembed(a) for a in anchors]
+        _ANCHOR_EMBED_CACHE[key] = [await _aembed(a, api_key=api_key) for a in anchors]
     anchor_vecs = _ANCHOR_EMBED_CACHE[key]
-    resp_vec = await _aembed(response_text)
+    resp_vec = await _aembed(response_text, api_key=api_key)
     sims = [_cosine(resp_vec, av) for av in anchor_vecs]
     min_sim = min(sims)
     shifted = [max(0.0, s - min_sim) for s in sims]
@@ -596,7 +879,10 @@ async def _ssr_score(response_text: str, anchors: list[str]) -> tuple[list[float
     return pmf, ev
 
 
-async def _prewarm_anchor_cache(questions: list[SurveyQuestion]) -> None:
+async def _prewarm_anchor_cache(
+    questions: list[SurveyQuestion],
+    api_key: str | None = None,
+) -> None:
     """Pre-embed anchors for all SSR questions before simulation fan-out."""
     seen: set[tuple[str, ...]] = set()
     for q in questions:
@@ -605,7 +891,7 @@ async def _prewarm_anchor_cache(questions: list[SurveyQuestion]) -> None:
             key = tuple(anchors)
             if key not in seen and key not in _ANCHOR_EMBED_CACHE:
                 seen.add(key)
-                _ANCHOR_EMBED_CACHE[key] = [await _aembed(a) for a in anchors]
+                _ANCHOR_EMBED_CACHE[key] = [await _aembed(a, api_key=api_key) for a in anchors]
 
 
 # ---------------------------------------------------------------------------
@@ -618,8 +904,9 @@ def _build_question_instruction(q: SurveyQuestion) -> str:
         if q.use_ssr:
             body = (
                 f"{q.text}\n"
-                f"In 1-2 sentences, describe honestly and specifically how you feel about this. "
-                f"Do not mention numbers or rating scales."
+                f"Answer in exactly one complete sentence, 10-30 words. "
+                f"Describe honestly and specifically how you feel about this. "
+                f"Do not mention numbers or rating scales. End with terminal punctuation."
             )
         else:
             body = (
@@ -648,8 +935,62 @@ def _build_question_instruction(q: SurveyQuestion) -> str:
             f"Reply with letters only, no other text."
         )
     else:
-        body = f"{q.text}\nAnswer in 1-2 sentences. Be honest and specific."
+        body = (
+            f"{q.text}\n"
+            f"Answer in exactly one complete sentence. Be honest and specific. "
+            f"End with terminal punctuation."
+        )
     return prefix + body
+
+
+def _max_tokens_for_question(q: SurveyQuestion) -> int:
+    if q.type == "binary":
+        return 8
+    if q.type in ("wtp",):
+        return 16
+    if q.type == "likert5" and not q.use_ssr:
+        return 16
+    if q.type == "multi_select":
+        return 64
+    if q.type == "likert5" and q.use_ssr:
+        return 1024
+    if q.type == "open":
+        return 1024
+    return 256
+
+
+def _retry_max_tokens_for_question(q: SurveyQuestion, current: int) -> int:
+    if q.type == "open" or (q.type == "likert5" and q.use_ssr):
+        return max(current * 2, 2048)
+    return max(current * 2, current + 64)
+
+
+def _has_terminal_punctuation(text: str) -> bool:
+    return bool(re.search(r'[.!?。！？…]["\'”’）\)]*\s*$', text.strip()))
+
+
+def _word_count(text: str) -> int:
+    latin_words = re.findall(r"\b[\w'-]+\b", text)
+    cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    return len(latin_words) + max(1, len(cjk_chars) // 2) if cjk_chars else len(latin_words)
+
+
+def _is_incomplete_free_text(text: str) -> bool:
+    clean = text.strip()
+    if not clean:
+        return True
+    if _word_count(clean) < 8:
+        return True
+    return not _has_terminal_punctuation(clean)
+
+
+def _language_instruction() -> str:
+    lang = (RESPONSE_LANGUAGE or "match_input").lower()
+    if lang in ("traditional_chinese", "traditional chinese", "zh-tw", "chinese"):
+        return "Response language: Traditional Chinese. Do not switch to English unless quoting a brand name."
+    if lang in ("english", "en"):
+        return "Response language: English. Do not switch to Chinese unless quoting a local term."
+    return "Response language: match the language of the survey question and policy context."
 
 
 def _parse_response(q: SurveyQuestion, raw: str) -> Any:
@@ -682,62 +1023,124 @@ def _parse_response(q: SurveyQuestion, raw: str) -> Any:
         return raw.strip()
 
 
+_RESPONDENT_VARIATION_AXES = [
+    ("budget pressure", ["very tight", "moderate", "comfortable"]),
+    ("tech comfort", ["low", "medium", "high"]),
+    ("time pressure", ["low", "moderate", "high"]),
+    ("risk tolerance", ["cautious", "balanced", "adventurous"]),
+    ("policy attention", ["barely aware", "somewhat aware", "well informed"]),
+]
+
+
+def _respondent_variation(index: int) -> str:
+    """Create a small deterministic micro-profile for each simulated respondent."""
+    if index < 0:
+        index = 0
+    traits = []
+    for axis_i, (axis, values) in enumerate(_RESPONDENT_VARIATION_AXES):
+        value = values[(index + axis_i) % len(values)]
+        traits.append(f"{axis}: {value}")
+    return "; ".join(traits)
+
+
 async def _simulate_one(
     segment: Segment,
     question: SurveyQuestion,
     semaphore: asyncio.Semaphore,
-    headlines: list[MediaHeadline] | None = None,  # <== 新增這一行
+    respondent_index: int = 0,
+    headlines: list[MediaHeadline] | None = None,
     api_key: str | None = None,
+    chat_api_key: str | None = None,
+    embed_api_key: str | None = None,
     max_retries: int = 10,
 ) -> SimulatedResponse:
     instruction = _build_question_instruction(question)
-    
-    # <== 新增：將媒體標題注入到系統提示詞 (System Prompt) 中
-    system_prompt = segment.description
+    chat_key = chat_api_key if chat_api_key is not None else api_key
+    embed_key = embed_api_key if embed_api_key is not None else api_key
+
+    respondent_profile = _respondent_variation(respondent_index)
+    system_prompt = (
+        f"{segment.description}\n\n"
+        f"Respondent micro-profile for this answer: {respondent_profile}.\n"
+        "Answer as this individual respondent, not as an average of the whole segment.\n"
+        f"{_language_instruction()}"
+    )
     if headlines:
         env_context = "\n\n📰 Current Media & Social Atmosphere:\n" + "\n".join(
             f"- [{h.platform}] {h.content} (Sentiment: {h.sentiment})" for h in headlines
         ) + "\n\nPlease consider this social atmosphere when answering."
         system_prompt += env_context
 
-    delay = 20.0
+    max_tokens = _max_tokens_for_question(question)
+    finish_reason = None
+    rate_delay = RATE_LIMIT_RETRY_SECONDS
+    transient_delay = TRANSIENT_RETRY_SECONDS
     for attempt in range(max_retries):
         try:
             async with semaphore:
-                raw = await _achat(
+                chat_result = await _achat_result(
                     model=SIM_MODEL,
-                    system=system_prompt,  # <== 改用組合好的 system_prompt
+                    system=system_prompt,
                     user=instruction,
-                    max_tokens=256,
+                    max_tokens=max_tokens,
                     temperature=1.0,
-                    api_key=api_key,
+                    api_key=chat_key,
                 )
+                raw = chat_result.text
+                finish_reason = chat_result.finish_reason
+                if finish_reason == "length":
+                    retry_tokens = _retry_max_tokens_for_question(question, max_tokens)
+                    print(
+                        f"Simulation response hit max_tokens for {segment.name} / {question.id}; "
+                        f"retrying with max_tokens={retry_tokens}."
+                    )
+                    chat_result = await _achat_result(
+                        model=SIM_MODEL,
+                        system=system_prompt,
+                        user=instruction,
+                        max_tokens=retry_tokens,
+                        temperature=1.0,
+                        api_key=chat_key,
+                    )
+                    raw = chat_result.text
+                    finish_reason = chat_result.finish_reason
             break
-        except litellm.exceptions.RateLimitError:
-            print(f"⚠️ [DEBUG-Engine] 觸發 Google 流量限制 (Simulation)！強制等待 {delay} 秒... (第 {attempt+1} 次嘗試)")
-            if attempt == max_retries - 1:
+        except Exception as exc:
+            if not _is_transient_llm_error(exc) or attempt == max_retries - 1:
                 raise
-            await asyncio.sleep(delay) # <== 這裡才有 await
-            delay = min(delay * 1.5, 120.0)
+            is_rate_limit = isinstance(exc, litellm.exceptions.RateLimitError)
+            wait = rate_delay if is_rate_limit else transient_delay
+            label = "rate limit" if is_rate_limit else "transient provider"
+            print(
+                f"{label.title()} error during simulation call; waiting {wait:.1f}s "
+                f"before retry {attempt + 2}/{max_retries}."
+            )
+            await asyncio.sleep(wait)
+            if is_rate_limit:
+                rate_delay = min(rate_delay * 1.5, TRANSIENT_MAX_DELAY_SECONDS)
+            else:
+                transient_delay = min(transient_delay * 1.5, TRANSIENT_MAX_DELAY_SECONDS)
             
     if question.type == "likert5" and question.use_ssr:
         anchors = _resolve_anchors(question)
-        pmf, ev = await _ssr_score(raw, anchors)
+        pmf, ev = await _ssr_score(raw, anchors, api_key=embed_key)
         return SimulatedResponse(
             segment_name=segment.name,
-            persona_detail=segment.description[:80] + "...",
+            persona_detail=f"{segment.description[:80]}... [{respondent_profile}]",
             question_id=question.id,
             raw_response=raw,
             parsed_value=ev,
             pmf=pmf,
+            finish_reason=finish_reason,
         )
     return SimulatedResponse(
         segment_name=segment.name,
-        persona_detail=segment.description[:80] + "...",
+        persona_detail=f"{segment.description[:80]}... [{respondent_profile}]",
         question_id=question.id,
         raw_response=raw,
         parsed_value=_parse_response(question, raw),
         pmf=None,
+        finish_reason=finish_reason,
     )
 
 
@@ -748,39 +1151,57 @@ async def run_simulation_async(
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
     api_key: str | None = None,
+    chat_api_key: str | None = None,
+    embed_api_key: str | None = None,
     progress_callback=None,
 ) -> list[SimulatedResponse]:
     semaphore = asyncio.Semaphore(max_concurrent)
+    chat_key = chat_api_key if chat_api_key is not None else api_key
+    embed_key = embed_api_key if embed_api_key is not None else api_key
 
-    print("👉 [DEBUG-Engine] 開始預載入 Embedding (這可能需要幾秒鐘)...")
-    await _prewarm_anchor_cache(questions)
-    print("✅ [DEBUG-Engine] Embedding 載入完成！開始派發問卷任務...")
+    print(f"Rate limit pacing: {_rate_limit_summary()}.")
+    print("Prewarming embeddings for SSR questions...")
+    await _prewarm_anchor_cache(questions, api_key=embed_key)
+    print("Embedding prewarm complete; starting simulation tasks.")
 
     total = len(segments) * len(questions) * responses_per_cell
     completed = 0
 
-    async def _sim_with_progress(segment, question):
+    async def _sim_with_progress(segment, question, respondent_index):
         nonlocal completed
         try:
-            result = await _simulate_one(segment, question, semaphore, headlines=headlines, api_key=api_key)
+            result = await _simulate_one(
+                segment,
+                question,
+                semaphore,
+                respondent_index=respondent_index,
+                headlines=headlines,
+                chat_api_key=chat_key,
+                embed_api_key=embed_key,
+            )
             completed += 1
-            print(f"🟢 [DEBUG-Engine] 模擬成功！目前總進度 {completed}/{total}")
             if progress_callback is not None:
                 progress_callback(completed, total)
             return result
         except Exception as e:
-            print(f"❌ [DEBUG-Engine] 任務失敗 {segment.name} - {question.id}，錯誤：{e}")
+            print(f"Simulation task failed for {segment.name} / {question.id}: {e}")
             raise
 
     tasks = [
-        _sim_with_progress(segment, question)
+        _sim_with_progress(segment, question, respondent_index)
         for segment in segments
         for question in questions
-        for _ in range(responses_per_cell)
+        for respondent_index in range(responses_per_cell)
     ]
-    print(f"👉 [DEBUG-Engine] 共 {len(tasks)} 個任務，準備進行非同步併發...")
+    print(f"Dispatching {len(tasks)} simulation tasks...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    print("✅ [DEBUG-Engine] 所有併發任務執行完畢！")
+    errors = [r for r in results if isinstance(r, Exception)]
+    if errors:
+        raise RuntimeError(
+            f"{len(errors)}/{len(tasks)} simulation calls failed; "
+            f"first error: {errors[0]}"
+        )
+    print("Simulation tasks complete.")
     return [r for r in results if isinstance(r, SimulatedResponse)]
 
 def run_simulation(
@@ -790,12 +1211,17 @@ def run_simulation(
     responses_per_cell: int = 10,
     max_concurrent: int = 3,
     api_key: str | None = None,
+    chat_api_key: str | None = None,
+    embed_api_key: str | None = None,
     progress_callback=None,
 ) -> list[SimulatedResponse]:
     return asyncio.run(
         run_simulation_async(
             segments, questions, headlines, responses_per_cell, max_concurrent, # <== 傳入 headlines
-            api_key=api_key, progress_callback=progress_callback,
+            api_key=api_key,
+            chat_api_key=chat_api_key,
+            embed_api_key=embed_api_key,
+            progress_callback=progress_callback,
         )
     )
 
@@ -911,6 +1337,125 @@ def _aggregate_responses(
     return segment_results
 
 
+def analyze_run_quality(
+    responses: list[SimulatedResponse],
+    segments: list[Segment],
+    questions: list[SurveyQuestion],
+    responses_per_cell: int,
+) -> dict[str, Any]:
+    expected_cells = len(segments) * len(questions)
+    expected_responses = expected_cells * responses_per_cell
+    by_cell: dict[tuple[str, str], list[SimulatedResponse]] = {}
+    for r in responses:
+        by_cell.setdefault((r.segment_name, r.question_id), []).append(r)
+
+    missing_cells = []
+    duplicate_cells = []
+    all_same_likert_cells = []
+    length_finished_cells = []
+    incomplete_open_cells = []
+    short_ssr_cells = []
+    invalid_parses = 0
+    for seg in segments:
+        for q in questions:
+            key = (seg.name, q.id)
+            cell = by_cell.get(key, [])
+            if len(cell) < responses_per_cell:
+                missing_cells.append({
+                    "segment": seg.name,
+                    "question_id": q.id,
+                    "expected": responses_per_cell,
+                    "actual": len(cell),
+                })
+            raw_values = [r.raw_response for r in cell]
+            if len(raw_values) >= 2 and len(set(raw_values)) == 1:
+                duplicate_cells.append({"segment": seg.name, "question_id": q.id})
+            length_count = sum(r.finish_reason == "length" for r in cell)
+            if length_count:
+                length_finished_cells.append({
+                    "segment": seg.name,
+                    "question_id": q.id,
+                    "count": length_count,
+                })
+            parsed_values = [r.parsed_value for r in cell]
+            invalid_parses += sum(v is None for v in parsed_values)
+            if q.type == "likert5" and len(parsed_values) >= 2:
+                comparable = [v for v in parsed_values if v is not None]
+                if len(comparable) >= 2 and len(set(str(v) for v in comparable)) == 1:
+                    all_same_likert_cells.append({"segment": seg.name, "question_id": q.id})
+            if q.type == "open":
+                incomplete = [
+                    r for r in cell
+                    if _is_incomplete_free_text(r.raw_response)
+                ]
+                if incomplete:
+                    incomplete_open_cells.append({
+                        "segment": seg.name,
+                        "question_id": q.id,
+                        "count": len(incomplete),
+                    })
+            if q.type == "likert5" and q.use_ssr:
+                short = [
+                    r for r in cell
+                    if _word_count(r.raw_response) < 10 or _is_incomplete_free_text(r.raw_response)
+                ]
+                if short:
+                    short_ssr_cells.append({
+                        "segment": seg.name,
+                        "question_id": q.id,
+                        "count": len(short),
+                    })
+
+    duplicate_rate = len(duplicate_cells) / expected_cells if expected_cells else 0.0
+    same_likert_total = sum(1 for q in questions if q.type == "likert5") * len(segments)
+    same_likert_rate = (
+        len(all_same_likert_cells) / same_likert_total if same_likert_total else 0.0
+    )
+    ssr_count = sum(1 for q in questions if q.type == "likert5" and q.use_ssr)
+    sdb_pairs = len([q for q in questions if q.id.endswith("_anon")])
+
+    warnings = []
+    if len(responses) < expected_responses:
+        warnings.append(f"Missing {expected_responses - len(responses)} expected responses.")
+    if responses_per_cell < 5:
+        warnings.append("n_per_cell is below 5; treat results as a smoke test, not final evidence.")
+    if duplicate_rate > 0.35:
+        warnings.append(f"High duplicate-response rate: {duplicate_rate:.0%} of cells.")
+    if same_likert_rate > 0.45:
+        warnings.append(f"Many Likert cells have no within-cell variation: {same_likert_rate:.0%}.")
+    if invalid_parses:
+        warnings.append(f"{invalid_parses} responses could not be parsed.")
+    if length_finished_cells:
+        warnings.append(f"{sum(c['count'] for c in length_finished_cells)} responses hit the model max_tokens limit.")
+    if incomplete_open_cells:
+        warnings.append(f"{sum(c['count'] for c in incomplete_open_cells)} open responses look incomplete or too short.")
+    if short_ssr_cells:
+        warnings.append(f"{sum(c['count'] for c in short_ssr_cells)} SSR free-text responses look too short for reliable embedding.")
+    if ssr_count == 0:
+        warnings.append("No SSR/free-text Likert questions used; integer-scale outputs may be coarse.")
+    if sdb_pairs == 0:
+        warnings.append("No SDB pair included; this is fine if the topic is not sensitive.")
+
+    return {
+        "expected_responses": expected_responses,
+        "actual_responses": len(responses),
+        "expected_cells": expected_cells,
+        "missing_cells": missing_cells,
+        "duplicate_cells": duplicate_cells,
+        "duplicate_cell_rate": round(duplicate_rate, 3),
+        "all_same_likert_cells": all_same_likert_cells,
+        "all_same_likert_rate": round(same_likert_rate, 3),
+        "length_finished_cells": length_finished_cells,
+        "incomplete_open_cells": incomplete_open_cells,
+        "short_ssr_cells": short_ssr_cells,
+        "invalid_parse_count": invalid_parses,
+        "ssr_question_count": ssr_count,
+        "sdb_pair_count": sdb_pairs,
+        "warnings": warnings,
+        "rate_limit": _rate_limit_summary(),
+    }
+
+
 AGENT2_SYSTEM = """\
 You are a senior market research analyst. Based on the survey simulation results below,
 produce a structured strategic report.
@@ -961,7 +1506,7 @@ def run_agent2(
             elif stats["type"] == "binary":
                 summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> {stats['pct_yes']}% yes (n={stats['n']})")
             elif stats["type"] == "wtp":
-                summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> mean WTP=NT${stats['mean']} (n={stats['n']})")
+                summary_lines.append(f"  [{qid}]{cond_tag} {q_text[:60]} -> mean numeric response=NT${stats['mean']} (n={stats['n']})")
             elif stats["type"] == "multi_select":
                 top = sorted(stats["rates"].items(), key=lambda x: -x[1])[:3]
                 top_str = ", ".join(f"{o}:{r}%" for o, r in top)

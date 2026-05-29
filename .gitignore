@@ -16,6 +16,7 @@ __pycache__/
 .vscode/
 .streamlit/
 .claude/
+.cache/
 
 # generated outputs
 runs/

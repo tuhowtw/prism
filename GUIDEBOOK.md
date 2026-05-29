@@ -83,14 +83,14 @@ python -m venv .venv
 ## Step 4: Install Dependencies
 
 ```bash
-pip install litellm streamlit plotly python-dotenv pandas
+pip install -r requirements.txt
 ```
 
-Or if a full requirements file exists:
+If you are working from an older copy of the repo, make sure these core runtime
+packages are installed:
 
 ```bash
-pip install -r requirements.txt
-pip install litellm python-dotenv  # ensure these are present
+pip install litellm python-dotenv streamlit plotly pandas
 ```
 
 ---
@@ -101,18 +101,37 @@ Create a file named `.env` in the project root (it is gitignored — never commi
 
 ```
 # .env
+# Use one or more providers in the Streamlit sidebar.
 GEMINI_API_KEY=AIza...your-key-here...
-
-# Optional: use Claude models instead of Gemini
-# ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
 
 # Model overrides (defaults shown)
-PRISM_AGENT_MODEL=gemini/gemini-2.5-flash
-PRISM_SIM_MODEL=gemini/gemini-2.5-flash
+PRISM_AGENT_MODEL=gemini/gemini-3.1-flash-lite
+PRISM_SIM_MODEL=gemini/gemini-3.1-flash-lite
+PRISM_EMBED_MODEL=gemini/gemini-embedding-001
+
+# Rate-limit pacing for Gemini Flash Lite low-tier quotas.
+# 15 RPM means one request starts about every 4.2 seconds.
+PRISM_REQUESTS_PER_MINUTE=15
+PRISM_RATE_LIMIT_RETRY_SECONDS=65
 
 # Allow engine to read key from .env (no need to enter in UI)
 PRISM_ALLOW_ENV_KEY=true
 ```
+
+The sidebar supports three chat providers:
+
+| Provider | Example chat models | Embedding support for SSR | RPM shown in UI |
+|---|---|---|---|
+| Gemini | `gemini/gemini-3.1-flash-lite`, `gemini/gemini-2.5-flash-lite` | `gemini/gemini-embedding-001` | Conservative/manual; check AI Studio active limits |
+| OpenAI | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` | `text-embedding-3-small`, `text-embedding-3-large` | Official Tier 1 RPM where available |
+| Claude | `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-4-6`, `anthropic/claude-haiku-4-5-20251001` | Needs OpenAI or Gemini embedding key | Official Tier 1 RPM where available |
+
+The RPM in the UI is used for Prism's pacing estimate and request throttle. Real
+limits are account/project-tier dependent, so adjust the manual RPM field if
+your provider console shows a different limit. The Test buttons try to read RPM
+from response headers when the provider exposes it.
 
 **How to get a Gemini API key:**
 
@@ -185,7 +204,7 @@ Simulation Layer
     │   For each segment × question × N respondents:
     │   - Inject persona as system prompt
     │   - Inject condition framing (anonymous / named / neutral)
-    │   - Async parallel LiteLLM calls (max_concurrent=3)
+    │   - Async LiteLLM calls paced by PRISM_REQUESTS_PER_MINUTE
     │
     ▼
 Aggregation
@@ -254,7 +273,10 @@ git push -u origin feature/my-feature
 
 | Problem | Fix |
 |---|---|
-| `RateLimitError` during simulation | Enable billing on Google AI Studio, or reduce N per cell |
+| `RateLimitError` during simulation | Keep `PRISM_REQUESTS_PER_MINUTE=15` for Flash Lite low-tier quotas, or reduce N per cell |
+| Gemini `503` / `high demand` during survey generation | Prism now retries transient provider errors with backoff. If it still fails after retries, wait a few minutes or temporarily switch to another Gemini model in Advanced model config |
+| Clarify fails with `No JSON object found` | Agent 1 clarify now retries once with a compact JSON-only prompt and a larger response budget. If this still happens, rerun with a less congested chat model |
+| Open or SSR responses look truncated | Simulation now uses question-type-specific token budgets, retries once when `finish_reason=length`, and surfaces incomplete text in the Quality tab |
 | `RuntimeError: No API key provided` | Add `PRISM_ALLOW_ENV_KEY=true` to `.env`, or enter key in the UI sidebar |
 | `ModuleNotFoundError: litellm` | Run `pip install litellm` inside the `.venv` |
 | Streamlit shows blank page | Check that you activated the venv before running |
