@@ -17,12 +17,15 @@ __pycache__/
 .streamlit/
 .claude/
 
-# generated outputs
+# generated outputs — exclude live run artifacts
 runs/
 *.db
 *.html
 *.jsonl
-smoke_raw_responses.jsonl
+
+# smoke_results/ is checked in intentionally — override glob rules above
+!smoke_results/
+!smoke_results/**
 
 # misc untracked dirs
 customer-survey-designer.zip

@@ -1,0 +1,53 @@
+{
+  "run_file": "smoke_raw_responses.jsonl",
+  "timestamp": "20260502_n20",
+  "n_per_cell": 20,
+  "input_text": "Research study on digital piracy implicit preferences in Taiwan. Goal: measure how frequency, drivers, moral attitudes, and willingness-to-pay for legal alternatives differ across socioeconomic segments, and quantify the social-desirability bias (SDB) gap between anonymous and named disclosure conditions. Domains: streaming services, ebooks, software, music.",
+  "segments": [
+    {"name": "Budget-conscious Student", "weight": 0.25, "description": "You are a 20-year-old university student in Taipei, living on a tight budget of NT$8,000/month from part-time work and family support. You use digital content daily — streaming, ebooks, software — but find legal options unaffordable. You casually pirate content without much guilt, seeing it as a practical necessity.", "rationale": "Students are a high-frequency piracy segment with the lowest disposable income, making price sensitivity and SDB gap likely to be pronounced."},
+    {"name": "Urban Tech-Savvy Professional", "weight": 0.25, "description": "You are a 32-year-old software engineer in Taipei earning NT$120,000/month. You subscribe to multiple legal platforms (Netflix, Spotify, Adobe) but also occasionally use unauthorized tools. You're aware of copyright law and feel mild guilt about piracy, but prioritize convenience.", "rationale": "High-income tech workers balance legal usage with occasional piracy; their SDB gap and WTP data benchmark the high end."},
+    {"name": "Family-Focused Parent", "weight": 0.25, "description": "You are a 42-year-old parent of two in Taichung with a household income of NT$80,000/month. You subscribe to legal streaming for your family but worry about the cost of multiple services. You view piracy as setting a bad example and rarely engage in it.", "rationale": "Parents represent a segment with high ethical concern and family-oriented content needs; expected low SDB gap and high guilt."},
+    {"name": "Value-Conscious Worker", "weight": 0.25, "description": "You are a 28-year-old office worker in Kaohsiung earning NT$35,000/month. You regularly use pirated content to stretch your budget — streaming sites, cracked software — but would deny it in formal settings due to social pressure.", "rationale": "Mid-income workers with high piracy behavior and strong social desirability effects; expected to show a large anonymous vs named gap."}
+  ],
+  "questions": [
+    {"id": "q_piracy_anon", "text": "How often do you use pirated or unauthorized digital content (streaming, software, ebooks, music)?", "type": "likert5", "condition": "anonymous", "scale_label": "1=Never, 5=Very Often", "options": []},
+    {"id": "q_piracy_named", "text": "How often do you use pirated or unauthorized digital content (streaming, software, ebooks, music)?", "type": "likert5", "condition": "named", "scale_label": "1=Never, 5=Very Often", "options": []},
+    {"id": "q_legal_frequency", "text": "How often do you use legal content platforms (e.g., Netflix, Spotify, official software)?", "type": "likert5", "condition": "neutral", "scale_label": "1=Never, 5=Daily", "options": []},
+    {"id": "q_importance_content", "text": "How important is access to digital content in your daily life?", "type": "likert5", "condition": "neutral", "scale_label": "1=Not at all important, 5=Extremely important", "options": []},
+    {"id": "q_drivers", "text": "Why do you choose unauthorized content over paid alternatives? Select all that apply.", "type": "multi_select", "condition": "neutral", "scale_label": "", "options": ["Price of legal options is too high", "Content not available legally in Taiwan", "Convenience and ease of access", "Habit or peer influence", "Copyright laws feel unfair", "No perceived harm to creators"]},
+    {"id": "q_ethics_serious", "text": "How seriously do you consider digital piracy to be unethical?", "type": "likert5", "condition": "neutral", "scale_label": "1=Not at all unethical, 5=Very seriously unethical", "options": []},
+    {"id": "q_copyright_fair", "text": "Do you think current copyright laws in Taiwan are fair to consumers?", "type": "likert5", "condition": "neutral", "scale_label": "1=Very unfair, 5=Very fair", "options": []},
+    {"id": "q_acceptable_afford", "text": "Is using pirated content acceptable when you cannot afford the legal alternative?", "type": "likert5", "condition": "neutral", "scale_label": "1=Strongly disagree, 5=Strongly agree", "options": []},
+    {"id": "q_guilt", "text": "How much guilt do you feel when using pirated content?", "type": "likert5", "condition": "neutral", "scale_label": "1=No guilt at all, 5=Strong guilt", "options": []},
+    {"id": "q_legal_value", "text": "Do legal content platforms provide good value for the price they charge?", "type": "likert5", "condition": "neutral", "scale_label": "1=Very poor value, 5=Excellent value", "options": []},
+    {"id": "q_trust_legal", "text": "Do you trust legal platforms to reliably deliver the content you want, without interruption or removal?", "type": "likert5", "condition": "neutral", "scale_label": "1=No trust, 5=Full trust", "options": []},
+    {"id": "q_wtp", "text": "What is the maximum monthly subscription fee (NT$) at which you would switch fully to legal content? Reply with a number only; reply 0 if you would never switch.", "type": "wtp", "condition": "neutral", "scale_label": "Respond with a number in NT$. Reply 0 if never.", "options": []},
+    {"id": "q_open", "text": "In 1-2 sentences, what is your main concern or hope about digital content access and piracy in Taiwan?", "type": "open", "condition": "neutral", "scale_label": "", "options": []}
+  ],
+  "sdb_gaps": {
+    "q_piracy": {
+      "Budget-conscious Student": 3.20,
+      "Value-Conscious Worker": 3.05,
+      "Family-Focused Parent": 1.65,
+      "Urban Tech-Savvy Professional": 1.50
+    }
+  },
+  "agent2": {
+    "overall_summary": {
+      "weighted_reception_score": 3.3,
+      "key_insight": "Despite varying WTP and ethical stances, high prices, content unavailability, and convenience issues are universal drivers of digital piracy in Taiwan, with significant underreporting of actual piracy behavior across all segments due to social desirability bias."
+    },
+    "target_segment": "Urban Tech-Savvy Professional",
+    "recommendations": [
+      "Implement tiered pricing models, especially for Budget-conscious Students (WTP NT$352.5) and Value-Conscious Workers (WTP NT$267.5), potentially offering student/low-income discounts or freemium options to convert high-frequency pirates into legal subscribers, as cost is a universal barrier.",
+      "Prioritize securing broader content licenses to address the 100% reported 'Content not available legally in Taiwan' driver across all segments, thereby removing a key justification for piracy.",
+      "Enhance the convenience and user experience of legal platforms, particularly for streaming and software, to match or exceed the ease of access offered by unauthorized content, which is a 100% driver for students, tech-savvy professionals, and value-conscious workers.",
+      "Develop bundled subscription packages for Family-Focused Parents (WTP NT$792.5) to address their concern about balancing the cost of multiple legal services, leveraging their high trust (5.0/5) and guilt (4.95/5) regarding piracy.",
+      "Launch targeted educational campaigns for Budget-conscious Students and Value-Conscious Workers, focusing on the value proposition of legal content (currently rated 1.95/5 and 2.75/5 respectively) and the ethical implications, as these segments show the lowest ethical concerns and highest SDB."
+    ],
+    "risk_flags": [
+      "The social desirability bias (SDB) gap is substantial across all segments, with Budget-conscious Students (+3.20) and Value-Conscious Workers (+3.05) showing the largest discrepancies between anonymous and named piracy disclosures. Actual piracy rates are significantly higher than self-reported figures in non-anonymous settings.",
+      "The universal drivers of piracy — high price of legal options (100% across all segments) and content not available legally in Taiwan (100% across all segments) — present fundamental structural challenges that, if unaddressed, will continue to fuel unauthorized consumption regardless of segment-specific WTP or ethical considerations."
+    ]
+  }
+}
